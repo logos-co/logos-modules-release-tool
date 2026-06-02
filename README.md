@@ -8,6 +8,12 @@ byte-compatible with what the GitHub-Actions `rebuild-index.yml` workflow in
 produces (in fact, that workflow uses this tool), so clients (`lgpd`, the
 `package_downloader` module, the package-manager UI) consume it identically.
 
+> 📖 **Format reference:** [`docs/catalog-format.md`](docs/catalog-format.md)
+> is the full specification of the two catalog files — `logos-repo.json`
+> (the catalog's identity card) and `index.json` (the package listing this
+> tool produces) — including every field, the version-selection rules, and
+> the download-verification contract clients enforce.
+
 ## Install
 
 `index.py` is a single Python 3 file with no dependencies besides the
@@ -122,6 +128,19 @@ Apply to `build`, `add`, and `validate --full`:
 | `missing` *(default)* | Use the paired local file if one was supplied; otherwise download. |
 | `all` | Always download. Local paths are noted but ignored. |
 | `none` | Never download. Every URL must have a local pairing or it's an error. |
+
+## Catalog format
+
+The two files that define a catalog —
+[`logos-repo.json`](docs/catalog-format.md#2-logos-repojson) and
+[`index.json`](docs/catalog-format.md#3-indexjson) — are specified in
+full in **[`docs/catalog-format.md`](docs/catalog-format.md)**: every
+field (required / optional / informational), the embedded `manifest` and
+`signature` objects, how versions are ordered and selected, and the
+[download-verification contract](docs/catalog-format.md#7-the-download-verification-contract)
+the client enforces before installing a `.lgx`. Read it before
+hand-authoring a `logos-repo.json` or debugging why a client won't install
+from your catalog.
 
 ## How it fits together
 
