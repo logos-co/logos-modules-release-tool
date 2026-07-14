@@ -323,16 +323,34 @@ generator never writes it.
 
 ## 6. Version ordering and selection
 
-`versions[]` is stored **newest-first, sorted descending by `releasedAt`**.
-Both the generator (`index.py` re-sorts on every `build`/`add`) and the
-client (`getCatalogJson` stable-sorts on read) enforce this, so a
-hand-mangled order is corrected at read time — but keep the file sorted so
-it reads correctly raw.
+`versions[]` is stored **newest-first by [SemVer 2.0.0](https://semver.org/spec/v2.0.0.html)
+precedence**, with `releasedAt` breaking ties between entries that share a
+version. Both the generator (`index.py` re-sorts on every `build`/`add`) and
+the client (`getCatalogJson` stable-sorts on read) enforce this, so a
+hand-mangled order is corrected at read time — but keep the file sorted so it
+reads correctly raw.
+
+Ordering is computed by `lgx semver`, which is the single implementation the
+C++ clients (`lgpm`, `lgpd`, the package-manager UI) also use. The catalog
+therefore cannot disagree with them about which version is newest.
+
+> **This used to be "sorted descending by `releasedAt`", and that was a bug.**
+> A publish time is not a version. Publishing `2.0.0-alpha` after `1.9.0` put
+> the alpha at `versions[0]` — i.e. advertised an unreleased alpha to every
+> client as the latest release. A `1.2.1` backported after `2.0.0` shipped did
+> the same, as did a forced republish (which refreshes the asset's
+> `Last-Modified`, and that is what `releasedAt` actually records).
+
+Precedence follows the spec: a pre-release ranks below its own release
+(`1.0.0-rc.1` < `1.0.0`), numeric pre-release identifiers compare *numerically*
+(`1.0.0-rc.2` < `1.0.0-rc.11`), and build metadata is ignored. A version string
+that isn't parseable ranks below every one that is, so junk can never win
+"latest".
 
 Selection rules the client uses when resolving "which build":
 
-- **Newest version**: `versions[0]` after the descending sort — the entry
-  with the latest `releasedAt`.
+- **Newest version**: `versions[0]` after the descending sort — the entry with
+  the highest version, *not* the most recently published one.
 - **A specific version string** (e.g. a user picking `1.0.0`): the client
   filters by the embedded `manifest.version`. If several entries share a
   version string (different `rootHash`), the newest by `releasedAt` wins.
@@ -342,11 +360,11 @@ Selection rules the client uses when resolving "which build":
   validate` flags it).
 
 `releasedAt` is a *made-available* time, not a build time. In the
-GitHub-Actions flow it's the release's publish time; for a self-hosted
-catalog built with `index.py` it's the `.lgx`'s HTTP `Last-Modified` (or
-the local file's mtime, or the run time as a last resort). Minute-level
-differences between two regenerations of the same catalog are expected and
-harmless.
+GitHub-Actions flow it's the `.lgx` asset's HTTP `Last-Modified`; for a
+self-hosted catalog built with `index.py` it's the same, or the local file's
+mtime, or the run time as a last resort. Minute-level differences between two
+regenerations of the same catalog are expected and harmless — and, now that it
+no longer drives the ordering, inconsequential.
 
 ---
 

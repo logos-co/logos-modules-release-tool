@@ -36,8 +36,15 @@
 #                    (build/add abort, validate reports per-entry)
 #
 # `build`, `add`, and `validate --full` require the `lgx` binary on PATH
-# (every package is verified). `remove` / `list` / `show` / `validate`
-# (light) are pure JSON ops — no `lgx`, no network.
+# (every package is verified). `remove` / `list` / `show` need no network.
+#
+# `lgx` also owns VERSION ORDERING. `versions[]` is stored newest-first by
+# SemVer 2.0.0 precedence (see sort_versions), and that order is computed by
+# `lgx semver` rather than reimplemented here — it is the same implementation
+# the C++ clients (lgpm, lgpd, the package-manager UI) use, so the catalog
+# cannot disagree with them about which version is newest. `validate` (light)
+# therefore also consults `lgx` when it is present, and reports the ordering as
+# unchecked when it isn't.
 #
 # Install lgx:   nix build github:logos-co/logos-package#lgx
 #
@@ -116,6 +123,24 @@ def require_lgx() -> None:
             "       Install with:  nix build github:logos-co/logos-package#lgx\n"
             "       Or skip the install path: this script's `remove` / `list` /\n"
             "       `show` / `validate` (light) subcommands work without lgx."
+        )
+
+
+def require_lgx_semver() -> None:
+    """Preflight: the `lgx` on PATH must have the `semver` subcommand.
+
+    Catalog ordering is delegated to it (see semver_rank_desc). An older lgx
+    predates it — abort loudly rather than silently falling back to sorting by
+    release date, which is the bug this replaced and which is invisible in the
+    output."""
+    r = subprocess.run(["lgx", "semver", "compare", "1.0.0", "1.0.0"],
+                       capture_output=True)
+    if r.returncode != 0:
+        die(
+            "the `lgx` on PATH has no `semver` subcommand (it predates it).\n"
+            "       Version ordering is delegated to lgx so the catalog agrees\n"
+            "       with the clients; refusing to fall back to a date sort.\n"
+            "       Update with:  nix build github:logos-co/logos-package#lgx"
         )
 
 
@@ -516,14 +541,67 @@ def merge_version(index: dict, name: str, entry: dict) -> bool:
     return True
 
 
+def entry_version(entry: dict) -> str:
+    """The version string of an index entry. `manifest` is legally null in
+    catalogs produced by early action runs, hence the `or {}`."""
+    manifest = entry.get("manifest") or {}
+    return manifest.get("version") or ""
+
+
+def semver_rank_desc(versions: list[str]) -> dict[str, int]:
+    """Map each version to its rank, 0 = newest, by SemVer 2.0.0 precedence.
+
+    Shells out to `lgx semver` rather than reimplementing semver here. `lgx`
+    owns the single implementation that the C++ clients (lgpm, lgpd, the
+    package-manager UI) also use, so the catalog cannot disagree with them
+    about which version is newest — which is exactly how the ordering drifted
+    before. It costs nothing: this script is stdlib-only but already requires
+    `lgx` on PATH for the only two subcommands that sort (`build` / `add`).
+
+    Entries with no version string rank last.
+    """
+    real = [v for v in versions if v]
+    ordered: list[str] = []
+    if real:
+        out = lgx_run("semver", "sort", "--desc", *real).decode("utf-8", "replace")
+        ordered = [line.strip() for line in out.splitlines() if line.strip()]
+        if sorted(ordered) != sorted(real):
+            raise RuntimeError(
+                "lgx semver sort returned an unexpected set of versions "
+                f"(asked for {sorted(real)}, got {sorted(ordered)})"
+            )
+
+    rank = {v: i for i, v in enumerate(ordered)}
+    for v in versions:
+        if not v:
+            rank[v] = len(ordered)
+    return rank
+
+
 def sort_versions(index: dict) -> None:
-    """Sort each package's `versions` descending by releasedAt so the
-    client's "newest first" picker (`findBest` in the downloader)
-    matches the order the catalog actually intends."""
+    """Order each package's `versions` newest-first by SemVer precedence,
+    tie-breaking on `releasedAt`.
+
+    This used to sort on `releasedAt` alone. A release timestamp is not the
+    same thing as a version: publishing `2.0.0-alpha` after `1.9.0` put the
+    alpha at `versions[0]`, and every client — the downloader's resolver, the
+    package-manager UI's row builder, `index.py list` — treats `versions[0]` as
+    "latest". A patch backported after a higher version had the same effect, as
+    did a forced republish (which refreshes the asset's Last-Modified, and that
+    is what `releasedAt` actually records).
+
+    `releasedAt` still breaks ties *within* one version, e.g. the same version
+    republished with a different rootHash.
+    """
     for pkg in index["packages"]:
-        pkg["versions"].sort(
-            key=lambda v: v.get("releasedAt", ""), reverse=True
-        )
+        entries = pkg["versions"]
+        if len(entries) < 2:
+            continue
+        # Pre-sort by date; the rank sort below is stable, so this survives as
+        # the tiebreak between entries sharing a version.
+        entries.sort(key=lambda v: v.get("releasedAt", ""), reverse=True)
+        rank = semver_rank_desc([entry_version(v) for v in entries])
+        entries.sort(key=lambda v: rank[entry_version(v)])
 
 
 def bump_generated_at(index: dict) -> None:
@@ -534,6 +612,7 @@ def bump_generated_at(index: dict) -> None:
 
 def cmd_build(args: argparse.Namespace) -> int:
     require_lgx()
+    require_lgx_semver()
     urls_file = pathlib.Path(args.urls_file)
     if not urls_file.exists():
         die(f"urls file not found: {urls_file}")
@@ -570,6 +649,7 @@ def cmd_build(args: argparse.Namespace) -> int:
 
 def cmd_add(args: argparse.Namespace) -> int:
     require_lgx()
+    require_lgx_semver()
     index_path = pathlib.Path(args.index)
     index = load_index(index_path)
 
@@ -704,9 +784,40 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 # ── subcommand: validate ─────────────────────────────────────────────────
 
+def check_version_order(ctx: str, name: str, versions: list) -> list[str]:
+    """`versions` must be newest-first by SemVer precedence, since every client
+    reads `versions[0]` as "latest".
+
+    This used to assert descending `releasedAt`. That check now has to go, and
+    not just because the sort changed: it would actively *reject* a correctly
+    ordered catalog, because a higher version legitimately carries an older
+    timestamp (a backport, or a forced republish refreshing Last-Modified).
+
+    Deciding the order needs semver, and semver lives in `lgx`. Light validate
+    is documented as working without `lgx`, so when it is absent we say the
+    ordering went unchecked rather than quietly passing it.
+    """
+    if shutil.which("lgx") is None:
+        warn(f"{ctx} ({name}): version ordering not checked — `lgx` is not on PATH")
+        return []
+
+    actual = [entry_version(v) for v in versions if isinstance(v, dict)]
+    if len(actual) < 2:
+        return []
+
+    rank = semver_rank_desc(actual)
+    for i in range(len(actual) - 1):
+        if rank[actual[i]] > rank[actual[i + 1]]:
+            return [
+                f"{ctx} ({name}): out of order — versions must be sorted newest-first "
+                f"by semver precedence, but {actual[i]!r} precedes {actual[i + 1]!r}"
+            ]
+    return []
+
+
 def _validate_light(index_path: pathlib.Path, index: dict) -> list[str]:
-    """Structural + internal consistency. No network, no `lgx` — just
-    walks the JSON tree and reports every inconsistency it finds.
+    """Structural + internal consistency. No network; uses `lgx` only to check
+    version ordering, and says so when it can't (see check_version_order).
 
     Returns a list of human-readable problems (empty = clean)."""
     issues: list[str] = []
@@ -742,7 +853,10 @@ def _validate_light(index_path: pathlib.Path, index: dict) -> list[str]:
             continue
 
         seen_keys: set[tuple[str, str]] = set()
-        previous_released: str | None = None
+        # Ordering is checked once per package, after the per-entry walk — it is
+        # a property of the sequence, not of any single entry, and it needs
+        # `lgx semver` (see check_version_order).
+        issues.extend(check_version_order(ctx, name, versions))
         for vi, v in enumerate(versions):
             vctx = f"{ctx}.versions[{vi}] ({name})"
             if not isinstance(v, dict):
@@ -764,15 +878,6 @@ def _validate_light(index_path: pathlib.Path, index: dict) -> list[str]:
                 issues.append(
                     f"{vctx}: manifest.name {mname!r} != package name {name!r}"
                 )
-            # Sort order
-            released = v.get("releasedAt")
-            if isinstance(released, str) and previous_released is not None:
-                if released > previous_released:
-                    issues.append(
-                        f"{vctx}: out of order — versions must be sorted "
-                        f"descending by releasedAt"
-                    )
-            previous_released = released if isinstance(released, str) else previous_released
             # Dedup key
             key = (manifest.get("version", ""), v.get("rootHash", ""))
             if key in seen_keys:
