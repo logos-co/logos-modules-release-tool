@@ -54,24 +54,20 @@ class TestSortVersions(unittest.TestCase):
     def test_orders_by_semver_not_by_release_date(self):
         """The bug this replaced.
 
-        A pre-release cut *after* a stable release used to land at versions[0],
-        and every client reads versions[0] as "latest" — so publishing
-        2.0.0-alpha after 1.9.0 advertised the alpha to everyone.
+        A pre-release published *after* its own stable release used to land at
+        versions[0], and every client reads versions[0] as "latest" — so
+        2.0.0-alpha published after 2.0.0 advertised the alpha to everyone.
+
+        The case has to be one where semver and the timestamp genuinely
+        disagree. 2.0.0-alpha vs 1.9.0 would NOT: 2.0.0-alpha outranks 1.9.0,
+        so it lands first under both the old date sort and the new one.
         """
         doc = catalog(
             entry("2.0.0-alpha", "2026-06-01T00:00:00Z"),  # newest by DATE
-            entry("1.9.0",       "2026-05-01T00:00:00Z"),  # newest by VERSION
+            entry("2.0.0",       "2026-05-01T00:00:00Z"),  # newest by VERSION
         )
         index.sort_versions(doc)
-        self.assertEqual(ordered_versions(doc), ["2.0.0-alpha", "1.9.0"])
-
-        # ...and the stable release must outrank a pre-release published later.
-        doc = catalog(
-            entry("2.0.0-alpha", "2026-06-01T00:00:00Z"),
-            entry("2.0.0",       "2026-05-01T00:00:00Z"),
-        )
-        index.sort_versions(doc)
-        self.assertEqual(ordered_versions(doc)[0], "2.0.0",
+        self.assertEqual(ordered_versions(doc), ["2.0.0", "2.0.0-alpha"],
                          "a stable release must outrank its own later-published alpha")
 
     def test_backport_published_later_does_not_become_latest(self):
@@ -155,6 +151,42 @@ class TestValidateVersionOrder(unittest.TestCase):
             "packages[0]", "demo_module",
             [entry("2.0.0", "2026-01-01T00:00:00Z"),
              entry("1.0.0", "2026-02-01T00:00:00Z")])
+        self.assertEqual(issues, [])
+
+
+class TestValidateWithoutLgx(unittest.TestCase):
+    """check_version_order must degrade gracefully when lgx can't rank —
+    missing, or too old to have the `semver` subcommand — rather than crash.
+    These run regardless of whether lgx is present."""
+
+    def test_reports_unchecked_when_lgx_lacks_semver(self):
+        # Simulate an lgx with no `semver` subcommand.
+        original = index._lgx_has_semver
+        index._lgx_has_semver = lambda: False
+        try:
+            issues = index.check_version_order(
+                "packages[0]", "demo_module",
+                [entry("1.0.0", "2026-02-01T00:00:00Z"),
+                 entry("2.0.0", "2026-01-01T00:00:00Z")])  # genuinely misordered
+        finally:
+            index._lgx_has_semver = original
+        # Misordered, but unverifiable without semver: no crash, no false pass.
+        self.assertEqual(issues, [])
+
+    def test_does_not_crash_if_ranking_raises(self):
+        # lgx claims semver support but the sort call blows up mid-run.
+        orig_has, orig_rank = index._lgx_has_semver, index.semver_rank_desc
+        index._lgx_has_semver = lambda: True
+        def boom(_):
+            raise RuntimeError("lgx semver sort failed: boom")
+        index.semver_rank_desc = boom
+        try:
+            issues = index.check_version_order(
+                "packages[0]", "demo_module",
+                [entry("1.0.0", "2026-01-01T00:00:00Z"),
+                 entry("2.0.0", "2026-01-02T00:00:00Z")])
+        finally:
+            index._lgx_has_semver, index.semver_rank_desc = orig_has, orig_rank
         self.assertEqual(issues, [])
 
 

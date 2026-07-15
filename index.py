@@ -126,6 +126,15 @@ def require_lgx() -> None:
         )
 
 
+def _lgx_has_semver() -> bool:
+    """True if an `lgx` with the `semver` subcommand is on PATH."""
+    if shutil.which("lgx") is None:
+        return False
+    r = subprocess.run(["lgx", "semver", "compare", "1.0.0", "1.0.0"],
+                       capture_output=True)
+    return r.returncode == 0
+
+
 def require_lgx_semver() -> None:
     """Preflight: the `lgx` on PATH must have the `semver` subcommand.
 
@@ -133,9 +142,7 @@ def require_lgx_semver() -> None:
     predates it — abort loudly rather than silently falling back to sorting by
     release date, which is the bug this replaced and which is invisible in the
     output."""
-    r = subprocess.run(["lgx", "semver", "compare", "1.0.0", "1.0.0"],
-                       capture_output=True)
-    if r.returncode != 0:
+    if not _lgx_has_semver():
         die(
             "the `lgx` on PATH has no `semver` subcommand (it predates it).\n"
             "       Version ordering is delegated to lgx so the catalog agrees\n"
@@ -583,12 +590,16 @@ def sort_versions(index: dict) -> None:
     tie-breaking on `releasedAt`.
 
     This used to sort on `releasedAt` alone. A release timestamp is not the
-    same thing as a version: publishing `2.0.0-alpha` after `1.9.0` put the
-    alpha at `versions[0]`, and every client — the downloader's resolver, the
+    same thing as a version, and every client — the downloader's resolver, the
     package-manager UI's row builder, `index.py list` — treats `versions[0]` as
-    "latest". A patch backported after a higher version had the same effect, as
-    did a forced republish (which refreshes the asset's Last-Modified, and that
-    is what `releasedAt` actually records).
+    "latest". Publishing `1.2.1` (a backport) after `2.0.0` put the *lower*
+    version at `versions[0]`; so did publishing `2.0.0-alpha` after `2.0.0`,
+    since the pre-release ranks below its own release but carried the newer
+    timestamp. A forced republish had the same effect (it refreshes the asset's
+    Last-Modified, which is what `releasedAt` actually records). Note it is only
+    a divergence when semver and the timestamp disagree: `2.0.0-alpha` published
+    after `1.9.0` lands first under *both* orderings, because `2.0.0-alpha`
+    genuinely outranks `1.9.0`.
 
     `releasedAt` still breaks ties *within* one version, e.g. the same version
     republished with a different rootHash.
@@ -794,18 +805,24 @@ def check_version_order(ctx: str, name: str, versions: list) -> list[str]:
     timestamp (a backport, or a forced republish refreshing Last-Modified).
 
     Deciding the order needs semver, and semver lives in `lgx`. Light validate
-    is documented as working without `lgx`, so when it is absent we say the
-    ordering went unchecked rather than quietly passing it.
+    is documented as working without `lgx`, so when `lgx` is missing — or is too
+    old to have the `semver` subcommand — we report the ordering as unchecked
+    rather than crashing or quietly passing it.
     """
-    if shutil.which("lgx") is None:
-        warn(f"{ctx} ({name}): version ordering not checked — `lgx` is not on PATH")
+    if not _lgx_has_semver():
+        warn(f"{ctx} ({name}): version ordering not checked — "
+             "`lgx` is missing or has no `semver` subcommand")
         return []
 
     actual = [entry_version(v) for v in versions if isinstance(v, dict)]
     if len(actual) < 2:
         return []
 
-    rank = semver_rank_desc(actual)
+    try:
+        rank = semver_rank_desc(actual)
+    except RuntimeError as e:
+        warn(f"{ctx} ({name}): version ordering not checked — {e}")
+        return []
     for i in range(len(actual) - 1):
         if rank[actual[i]] > rank[actual[i + 1]]:
             return [

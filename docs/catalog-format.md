@@ -335,11 +335,15 @@ C++ clients (`lgpm`, `lgpd`, the package-manager UI) also use. The catalog
 therefore cannot disagree with them about which version is newest.
 
 > **This used to be "sorted descending by `releasedAt`", and that was a bug.**
-> A publish time is not a version. Publishing `2.0.0-alpha` after `1.9.0` put
-> the alpha at `versions[0]` — i.e. advertised an unreleased alpha to every
-> client as the latest release. A `1.2.1` backported after `2.0.0` shipped did
-> the same, as did a forced republish (which refreshes the asset's
-> `Last-Modified`, and that is what `releasedAt` actually records).
+> A publish time is not a version. A `1.2.1` backported after `2.0.0` shipped
+> put the *lower* version at `versions[0]` — advertised to every client as the
+> latest release; publishing `2.0.0-alpha` after `2.0.0` did the same, since
+> the pre-release ranks below its own release but carried the newer timestamp.
+> A forced republish had the same effect (it refreshes the asset's
+> `Last-Modified`, which is what `releasedAt` records). The divergence only
+> appears when semver and the timestamp disagree — `2.0.0-alpha` published
+> after `1.9.0` lands first under *both* orderings, because `2.0.0-alpha`
+> genuinely outranks `1.9.0`.
 
 Precedence follows the spec: a pre-release ranks below its own release
 (`1.0.0-rc.1` < `1.0.0`), numeric pre-release identifiers compare *numerically*
