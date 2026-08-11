@@ -214,6 +214,10 @@ def save_index(path: pathlib.Path, index: dict) -> None:
     indent, sort_keys=False so the natural top-level field order
     (schemaVersion, repositoryName, generatedAt, packages) stays
     readable, trailing newline."""
+    # Create the output directory. Publishing icons used to do this as a
+    # side effect of its own mkdir, which made `--no-icons` fail on a path
+    # the default flow handled — same command, different directory rules.
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(index, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -349,8 +353,113 @@ def download(url: str, dest: pathlib.Path) -> str | None:
     return last_modified
 
 
+def emit_icon_sidecar(
+    lgx_path: pathlib.Path,
+    manifest: dict,
+    icons_dir: pathlib.Path | None,
+    icons_rel: str = "icons",
+) -> dict | None:
+    """Extract the package icon and publish it beside the .lgx.
+
+    Returns the index entry's `icon` object, or None when the package
+    carries no usable icon — no `icon` field at all (a `core` module, for
+    which it is optional), or a non-PNG one.
+
+    Works for legacy packages too, deliberately: a pre-0.4.0 manifest names
+    its icon by basename inside the variant, and the glob below matches that
+    just as it matches 0.4.0's assets/icon.png. So the whole catalog gets
+    pre-install icons, not only migrated modules — and basecamp renders a
+    legacy icon inset rather than full-bleed, which is how it already looks
+    once installed.
+
+        {"path": "icons/<sha256>.png", "sha256": "...", "size": 12043}
+
+    Why a sidecar at all: the icon lives inside the .lgx, so a client
+    that has not installed a package cannot see its icon without
+    downloading the whole thing — megabytes to render a 12 KB tile.
+    Publishing a standalone copy is what makes pre-install icons
+    possible. The two copies are byte-identical; the invariant
+    `sha256(sidecar) == sha256(assets/icon.png)` is what lets the whole
+    icon set be regenerated from a directory of .lgx files.
+
+    The filename IS the content hash, not <name>@<version>: almost no
+    package changes its icon between releases, so version-keyed names
+    would republish identical bytes every time. Content-addressing
+    dedupes across versions and packages, and makes the sidecar name
+    identical to the client's cache key.
+
+    `path` is repo-relative so re-mirroring a whole catalog is a
+    base-URL swap, and the hash (carried in the signed index) is what
+    makes the bytes trustworthy from any mirror.
+
+    Extraction goes through `lgx extract`, not Python's tarfile, because
+    `lgx` is the single implementation of the format. A second reader here
+    would be free to drift from the spec, and — more importantly — would
+    bypass the path-safety validation, decompression cap and forbidden-entry
+    checks that logos-package applies to untrusted archives. This runs once
+    per release, so the cost of unpacking a variant to recover one file is
+    not worth trading those for."""
+    icon_rel = manifest.get("icon", "")
+    if not icon_rel or icons_dir is None:
+        return None
+
+    # `lgx extract` (no -v) unpacks every variant into <out>/<variant>/, and
+    # root-level assets/ is emitted alongside each one — so the icon is at
+    # <out>/<any-variant>/<icon_rel> regardless of variant naming, which we
+    # cannot know from the manifest alone for a QML-only ui_qml package.
+    with tempfile.TemporaryDirectory(prefix="logos-icon-") as td:
+        out = pathlib.Path(td)
+        try:
+            lgx_run("extract", str(lgx_path), "-o", str(out))
+        except RuntimeError as exc:
+            raise FetchError(
+                f"{lgx_path.name}: `lgx extract` failed while recovering "
+                f"icon '{icon_rel}': {exc}"
+            ) from exc
+
+        found = sorted(out.glob(f"*/{icon_rel}"))
+        if not found:
+            raise FetchError(
+                f"{lgx_path.name}: manifest icon '{icon_rel}' is not present "
+                f"in the extracted package"
+            )
+        data = found[0].read_bytes()
+
+    # PNG only. Legacy (pre-0.4.0) packages ship whatever the author had, and
+    # a few still carry SVG. Serving untrusted SVG from a catalog means a
+    # client renders it BEFORE any signature check on the package — an SVG can
+    # reference external resources or act as a render bomb, which is why
+    # AppStream forbids it for catalog icons too. Those packages simply get no
+    # sidecar and fall back to a monogram until they ship a PNG.
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        warn("%s: icon '%s' is not a PNG — no sidecar published "
+             "(clients will show a monogram)" % (lgx_path.name, icon_rel))
+        return None
+
+    digest = hashlib.sha256(data).hexdigest()
+    icons_dir.mkdir(parents=True, exist_ok=True)
+    dest = icons_dir / f"{digest}.png"
+    # Content-addressed: identical bytes are already published.
+    if not dest.exists():
+        dest.write_bytes(data)
+        info(f"published icon {dest.name} ({len(data)} bytes)")
+
+    # Relative to the index, so re-mirroring a catalog is a base-URL swap.
+    # `icons_rel` is the subdirectory or "" for the flat layout.
+    rel = f"{icons_rel}/{digest}.png" if icons_rel else f"{digest}.png"
+    return {
+        "path": rel,
+        "sha256": digest,
+        "size": len(data),
+    }
+
+
 def version_entry_from_lgx(
-    url: str, lgx_path: pathlib.Path, released_at: str | None
+    url: str,
+    lgx_path: pathlib.Path,
+    released_at: str | None,
+    icons_dir: pathlib.Path | None = None,
+    icons_rel: str = "icons",
 ) -> tuple[str, dict]:
     """Turn a .lgx file into (package_name, version_entry).
 
@@ -429,6 +538,11 @@ def version_entry_from_lgx(
     }
     if signature is not None:
         entry["signature"] = signature
+
+    icon = emit_icon_sidecar(lgx_path, manifest, icons_dir, icons_rel)
+    if icon is not None:
+        entry["icon"] = icon
+
     return name, entry
 
 
@@ -501,6 +615,8 @@ def fetch_entry(
     local_path: str | None,
     fetch_mode: str,
     workdir: pathlib.Path,
+    icons_dir: pathlib.Path | None = None,
+    icons_rel: str = "icons",
 ) -> tuple[str, dict]:
     """Resolve the .lgx (download or take from disk) and convert it to
     a (name, version_entry) tuple. The fetch decision lives in
@@ -509,7 +625,7 @@ def fetch_entry(
     `version_entry_from_lgx` stays one code path regardless of where
     the bytes came from."""
     lgx_path, released_at = resolve_lgx(url, local_path, fetch_mode, workdir)
-    return version_entry_from_lgx(url, lgx_path, released_at)
+    return version_entry_from_lgx(url, lgx_path, released_at, icons_dir, icons_rel)
 
 
 # ── index mutation helpers ───────────────────────────────────────────────
@@ -621,6 +737,32 @@ def bump_generated_at(index: dict) -> None:
 
 # ── subcommand: build ────────────────────────────────────────────────────
 
+def resolve_icons_dir(args: argparse.Namespace) -> pathlib.Path | None:
+    """Where icon sidecars are written, or None to skip publishing them.
+
+    `--icons-dir` accepts an empty string, which writes them BESIDE the
+    index rather than in a subdirectory. That is what the GitHub-release
+    flow needs: `index.json` is uploaded as a release asset, and release
+    assets are a flat namespace — there is no `icons/` to put anything in,
+    and a slash is not valid in an asset name.
+
+    A self-hosted catalog on a plain web server can serve a real directory,
+    which gets you listing and orphan cleanup for free, so the default
+    stays `icons/`. The layout is a property of the transport, not of the
+    format: `icon.path` is stored per-entry and resolved relative to the
+    index URL, so a client never needs to know which form a repo chose."""
+    if getattr(args, "no_icons", False):
+        return None
+    # `build` writes to --output; `add` mutates a positional `index` in
+    # place. Icons must land beside whichever one this invocation targets,
+    # or the index's relative `icon.path` will not resolve.
+    target = getattr(args, "index", None) or getattr(args, "output", "index.json")
+    out = pathlib.Path(target)
+    base = out.parent if str(out.parent) != "" else pathlib.Path(".")
+    sub = getattr(args, "icons_dir", "icons")
+    return base / sub if sub else base
+
+
 def cmd_build(args: argparse.Namespace) -> int:
     require_lgx()
     require_lgx_semver()
@@ -638,11 +780,13 @@ def cmd_build(args: argparse.Namespace) -> int:
         "packages": [],
     }
 
+    icons_dir = resolve_icons_dir(args)
     with tempfile.TemporaryDirectory(prefix="logos-index-") as tmpdir:
         workdir = pathlib.Path(tmpdir)
         for url, local_path in pairs:
             try:
-                name, entry = fetch_entry(url, local_path, args.fetch, workdir)
+                name, entry = fetch_entry(url, local_path, args.fetch, workdir,
+                                          icons_dir, args.icons_dir)
             except FetchError as exc:
                 # Single-package failure aborts the build (locked
                 # policy: a bad input is not silently dropped).
@@ -677,11 +821,13 @@ def cmd_add(args: argparse.Namespace) -> int:
             "(positional, --from-file, or --with-local)")
 
     added = 0
+    icons_dir = resolve_icons_dir(args)
     with tempfile.TemporaryDirectory(prefix="logos-index-") as tmpdir:
         workdir = pathlib.Path(tmpdir)
         for url, local_path in pairs:
             try:
-                name, entry = fetch_entry(url, local_path, args.fetch, workdir)
+                name, entry = fetch_entry(url, local_path, args.fetch, workdir,
+                                          icons_dir, args.icons_dir)
             except FetchError as exc:
                 # Same single-package-aborts policy as `build`.
                 die(str(exc))
@@ -1075,6 +1221,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="text file with one entry per line: either `<url>` "
                          "or `<url> <local-path>` (whitespace-separated). "
                          "Blank lines + `#` comments ignored.")
+    pb.add_argument("--icons-dir", default="icons",
+                    help="directory (relative to the index) for icon sidecars; "
+                         "pass an empty string to write them beside the index, "
+                         "which is what GitHub release assets require "
+                         "[default: icons]")
+    pb.add_argument("--no-icons", action="store_true",
+                    help="do not extract or publish icon sidecars")
     pb.add_argument("-o", "--output", default="index.json",
                     help="output path (default: index.json)")
     pb.add_argument("--name", default=None,
@@ -1085,6 +1238,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     pa = sub.add_parser("add", help="merge new .lgx URLs into an existing index")
     pa.add_argument("index", help="index.json path (modified in place)")
+    pa.add_argument("--icons-dir", default="icons",
+                    help="directory (relative to the index) for icon sidecars; "
+                         "pass an empty string to write them beside the index, "
+                         "which is what GitHub release assets require "
+                         "[default: icons]")
+    pa.add_argument("--no-icons", action="store_true",
+                    help="do not extract or publish icon sidecars")
     pa.add_argument("url", nargs="*",
                     help=".lgx URL(s) — positional (URL-only; for pairs, use "
                          "--from-file or --with-local)")
