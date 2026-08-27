@@ -292,10 +292,23 @@ emits the embedded bytes verbatim.) Its fields:
 | `description` | string | One-line package description. Display only. The client lifts this (plus `type`/`category`/`author`/`icon`) from the **first** version's manifest to describe the package as a whole. |
 | `icon` | string | Icon file name within the package, or empty. Display only. |
 | `view` | string | For `ui_qml` packages: the QML entry point relative to the variant root. Empty for other types. |
+| `provides` | array | Intent **names** this package can service: `[{"intent": "chat.group.open"}]`. Present from `manifestVersion` 0.5.0. Always objects — the bundler normalises a bare string **up** to `{"intent": ...}` — so a reader never sees two shapes, and a future field costs no shape change. The author's `params` (the payload shape an intent expects) is deliberately **not** carried: the shell enforces that against the installed `metadata.json`, so a copy here would be a snapshot nothing reads. Display only **today** — see the note below. |
 
 The five **binding** fields — `name`, `version`, `main`, `dependencies`,
 `type` — are the ones the client re-checks against the downloaded file
 (§7). The rest are display metadata.
+
+> **`provides` and trust.** It is display metadata here, but it is inside the
+> manifest, so it *is* covered by the package signature (§5) — the signer
+> attests to what the package claims it can do. A shell must still read the
+> installed package's own declaration before dispatching an intent to it; the
+> catalog copy exists to answer "which installable package provides X?", which
+> is a question about what you could install, not about what you may run.
+>
+> It is deliberately **not** binding yet: a mismatch between the catalog and
+> the installed package is a stale index, not an escalation, because nothing
+> dispatches on the catalog copy. Promote it to binding (§7) once something
+> does.
 
 ---
 
