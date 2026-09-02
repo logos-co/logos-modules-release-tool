@@ -454,6 +454,32 @@ def emit_icon_sidecar(
     }
 
 
+def fetch_sidecar(lgx_url: str) -> dict:
+    """Fetch the `sidecar.json` published beside a package.
+    Returns empty object {} on failure.
+     """
+    if not lgx_url.startswith(("http://", "https://")):
+        return {}
+
+    url = lgx_url.rsplit("/", 1)[0] + "/sidecar.json"
+
+    with tempfile.TemporaryDirectory(prefix="logos-index-") as tmpdir:
+        dest = pathlib.Path(tmpdir) / "sidecar.json"
+        try:
+            download(url, dest)
+            sidecar = json.loads(dest.read_text())
+        except FetchError as exc:
+            warn(f"{url}: cannot download sidecar ({exc})")
+            return {}
+        except (ValueError, OSError) as exc:
+            warn(f"{url}: cannot read sidecar ({exc})")
+            return {}
+    if not isinstance(sidecar, dict):
+        warn(f"{url}: cannot parse sidecar (not a JSON object)")
+        return {}
+    return sidecar
+
+
 def version_entry_from_lgx(
     url: str,
     lgx_path: pathlib.Path,
@@ -543,6 +569,14 @@ def version_entry_from_lgx(
     if icon is not None:
         entry["icon"] = icon
 
+    sidecar = fetch_sidecar(url)
+    sidecar_sha = str(sidecar.get("sha256", "")).strip()
+    if sidecar_sha and sidecar_sha != sha256:
+        warn(f"{url}: sidecar sha256 does not match the package, dropping its CID")
+        cid = ""
+    else:
+        cid = str(sidecar.get("cid", "")).strip()
+    entry["urls"] = [f"logos:{cid}", url] if cid else [url]
     return name, entry
 
 

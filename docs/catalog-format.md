@@ -107,6 +107,7 @@ through it.
   "description": "The modules maintained by the Logos core team.",
   "homepage": "https://github.com/logos-co/logos-modules-v2",
   "indexUrl": "https://github.com/logos-co/logos-modules-v2/releases/download/index/index.json",
+  "network": "logos.test",
   "trustedSigners": [
     {
       "did": "did:jwk:eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6Ii4uLiJ9",
@@ -125,6 +126,7 @@ through it.
 | `indexUrl` | string | **yes** | Absolute URL of this catalog's `index.json`. The client fetches it verbatim — point it at wherever you publish the index. |
 | `description` | string | no | One-line human description. Defaults to empty. |
 | `homepage` | string | no | Informational URL (project page, docs). Defaults to empty. |
+| `network` | string | no | Logos Storage network. The catalog publishes its packages to this network. Defaults to empty. |
 | `trustedSigners` | array | no | Signer identities this catalog vouches for. See §2.3. Defaults to empty. |
 | `schemaVersion` | number | no* | Format version. See §2.4. |
 
@@ -183,6 +185,10 @@ package in the catalog and every published version of each.
           "releasedAt": "2026-05-12T13:36:54Z",
           "publisherRef": "wallet_module-v1.0.0",
           "url": "https://github.com/logos-co/logos-modules-v2/releases/download/wallet_module-v1.0.0/wallet_module-1.0.0.lgx",
+          "urls": [
+            "logos:zDvZRwzm3g3mPcYu1NmDKV5jCccw4FZ83XKyu85AjSCg7gH7zQdL",
+            "https://github.com/logos-co/logos-modules-v2/releases/download/wallet_module-v1.0.0/wallet_module-1.0.0.lgx"
+          ],
           "size": 17083080,
           "sha256": "9ab4be725b4b669713ca39f9f29648b5f26e41c89ea1a1bd7b1472db0d9ebb47",
           "rootHash": "ccf6b318787e6ffc33ce38a3940c0cf29334c2787a777eb036d29a0c1214858b",
@@ -252,6 +258,7 @@ package lives here. The array is sorted **descending by `releasedAt`**
 | `rootHash` | string | **yes** | **binding** | Hex SHA-256 Merkle root of the package content. Must equal the `.lgx`'s own `manifest.hashes.root`. The strongest index↔file binding (§7). |
 | `manifest` | object | **yes** | **binding** + display | A verbatim copy of the `.lgx`'s embedded `manifest.json` (§4). The client reads display fields from it and binds a subset against the downloaded file (§7). |
 | `releasedAt` | string | **yes** | ordering | ISO-8601 UTC `Z` timestamp. Drives version ordering and "newest" selection (§6). Missing/empty sorts *last*. |
+| `urls` | array | no | download | A list of sources for this artifact, one string per source. Schemes currently supported: `https://` and `logos:`. |
 | `signature` | object | no | **binding** | A verbatim copy of the `.lgx`'s `manifest.sig`, when the package is signed (§5). **Omit the key entirely for unsigned packages** — do not emit `null`. |
 | `publisherRef` | string | no | informational | Provenance tag, conventionally `<name>-v<version>` (the release tag in the GitHub flow). The client ignores it. |
 | `size` | number | no | informational | Size of the `.lgx` in bytes. Display / progress only. **Not** part of the client's download-verification (§7). |
@@ -269,6 +276,20 @@ signed-only.
 > repackaging of the archive and is what the manifest itself records, so
 > the index and the file can be cross-checked without trusting the
 > transport. `sha256` is kept for humans and out-of-band integrity tools.
+
+### 3.5 `urls` — one entry per artifact source
+
+`url` stays required for backwards compatibility. It is used as the fallback source when `urls` is absent
+or does not contain any `https://` scheme.
+
+`urls` lists the available sources, in no particular order:
+
+| Scheme | Meaning |
+|---|---|
+| `logos:<cid>` | Logos Storage content identifier. Fetched through a storage node, which must run on the network the repository declares (§2.2). The CID is derived from the content, so the same artifact has the same CID on every network. |
+| `https://…` | A plain HTTPS mirror, equivalent to `url`. |
+
+Every source must serve the same content.
 
 ---
 
@@ -513,6 +534,7 @@ fork-me template for a full catalog skeleton.
 ```
 name*          displayName*          indexUrl*           ← required
 description    homepage              trustedSigners[]    ← optional
+network
 schemaVersion (advisory, =1)
 trustedSigners[] = { did*, name? }
 ```
@@ -524,6 +546,7 @@ schemaVersion*  repositoryName*  generatedAt*  packages[]*
 packages[]      = { name*, versions[]* }
 versions[]      = { url*, rootHash*, releasedAt*, manifest*,   ← required
                     signature?,                                 ← signed only
+                    urls?,                                      ← extra sources
                     publisherRef?, size?, sha256? }             ← informational
 manifest        = { name*, version*, type*, main*, dependencies*, hashes*,
                     manifestVersion, category, author, description, icon, view }

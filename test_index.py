@@ -12,9 +12,11 @@ pass, which would defeat the point.
     nix build github:logos-co/logos-package#lgx   # then put ./result/bin on PATH
 """
 
+import json
 import shutil
 import subprocess
 import unittest
+from unittest import mock
 
 import index
 
@@ -189,6 +191,41 @@ class TestValidateWithoutLgx(unittest.TestCase):
             index._lgx_has_semver, index.semver_rank_desc = orig_has, orig_rank
         self.assertEqual(issues, [])
 
+
+LGX_URL = ("https://github.com/logos-co/logos-modules-release/releases/"
+           "download/demo_module-v1.0.0/demo_module-1.0.0.lgx")
+
+class TestSidecar(unittest.TestCase):
+    """Test the sidecar is fetched and the CID can be retrieved."""
+
+    def test_reads_the_cid_from_the_sidecar(self):
+        # Provide a sidecar with a CID
+        def fake_download(url, dest):
+            dest.write_text(json.dumps({"sha256": "abc", "cid": "zDvZRw"}))
+
+        with mock.patch.object(index, "download", fake_download):
+            self.assertEqual(index.fetch_sidecar(LGX_URL).get("cid", ""), "zDvZRw")
+
+    def test_no_cid_when_absent_from_sidecar(self):
+        def fake_download(url, dest):
+            dest.write_text(json.dumps({"sha256": "abc"}))
+
+        with mock.patch.object(index, "download", fake_download):
+            self.assertEqual(index.fetch_sidecar(LGX_URL).get("cid", ""), "")
+
+    def test_no_cid_when_the_sidecar_download_fails(self):
+        def fake_download(url, dest):
+            raise index.FetchError(f"download failed for {url}: HTTP 404 Not Found")
+
+        with mock.patch.object(index, "download", fake_download):
+            self.assertEqual(index.fetch_sidecar(LGX_URL).get("cid", ""), "")
+
+    def test_no_cid_when_the_sidecar_is_not_json(self):
+        def fake_download(url, dest):
+            dest.write_text("<html>404</html>")
+
+        with mock.patch.object(index, "download", fake_download):
+            self.assertEqual(index.fetch_sidecar(LGX_URL).get("cid", ""), "")
 
 if __name__ == "__main__":
     unittest.main()
