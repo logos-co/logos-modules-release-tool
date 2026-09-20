@@ -192,3 +192,184 @@ class TestValidateWithoutLgx(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ─── logos-repo.json and the includes document ───────────────────────────────
+#
+# Both are hand-edited, and `includesUrl` made them load-bearing: a malformed
+# include costs the catalog packages without failing anything at fetch time, by
+# design. These cover the gate that catches it at authoring time instead.
+
+def repo_doc(includes_url: str | None = None, **overrides) -> dict:
+    doc = {
+        "schemaVersion": 1,
+        "name": "my-distro",
+        "displayName": "My Distro",
+        "indexUrl": "https://example.com/my-distro/index.json",
+        "trustedSigners": [],
+    }
+    if includes_url is not None:
+        doc["includesUrl"] = includes_url
+    doc.update(overrides)
+    return doc
+
+
+def includes_doc(includes: list) -> dict:
+    return {"schemaVersion": 1, "includes": includes}
+
+
+OWN_INDEX = "https://example.com/my-distro/index.json"
+OWN_REPO = "https://example.com/my-distro/logos-repo.json"
+
+
+class ValidateRepoBasics(unittest.TestCase):
+    def test_minimal_document_is_valid(self):
+        self.assertEqual(index.validate_repo_doc(repo_doc()), [])
+
+    def test_missing_required_fields_are_reported(self):
+        doc = repo_doc()
+        del doc["displayName"]
+        del doc["indexUrl"]
+        issues = index.validate_repo_doc(doc)
+        self.assertEqual(len(issues), 2)
+        self.assertTrue(any("displayName" in i for i in issues))
+        self.assertTrue(any("indexUrl" in i for i in issues))
+
+    def test_index_url_must_be_https(self):
+        issues = index.validate_repo_doc(
+            repo_doc(indexUrl="http://example.com/index.json"))
+        self.assertTrue(any("indexUrl" in i and "https" in i for i in issues))
+
+
+class ValidateRepoIncludesUrl(unittest.TestCase):
+    def test_includes_url_is_optional(self):
+        self.assertEqual(index.validate_repo_doc(repo_doc()), [])
+
+    def test_valid_includes_url_passes(self):
+        doc = repo_doc("https://example.com/my-distro/includes.json")
+        self.assertEqual(index.validate_repo_doc(doc), [])
+
+    def test_includes_url_must_be_https(self):
+        doc = repo_doc("http://example.com/includes.json")
+        self.assertTrue(any("https" in i for i in index.validate_repo_doc(doc)))
+
+    def test_includes_url_must_be_a_string(self):
+        doc = repo_doc()
+        doc["includesUrl"] = ["https://example.com/includes.json"]
+        self.assertTrue(any("string" in i for i in index.validate_repo_doc(doc)))
+
+    # The list lives in its own document. An inline array here is the shape it
+    # had before the split and resolves to nothing.
+    def test_inline_includes_array_is_rejected(self):
+        doc = repo_doc()
+        doc["includes"] = [{"repo": "https://a.example/logos-repo.json"}]
+        self.assertTrue(any("includesUrl" in i
+                            for i in index.validate_repo_doc(doc)))
+
+    def test_pointing_at_own_index_url_is_caught(self):
+        doc = repo_doc(OWN_INDEX)
+        self.assertTrue(any("indexUrl" in i for i in index.validate_repo_doc(doc)))
+
+    def test_pointing_at_itself_is_caught_when_the_url_is_known(self):
+        doc = repo_doc(OWN_REPO)
+        self.assertEqual(index.validate_repo_doc(doc), [])
+        self.assertTrue(any("logos-repo.json" in i for i in
+                            index.validate_repo_doc(doc, self_url=OWN_REPO)))
+
+
+class ValidateIncludesDoc(unittest.TestCase):
+    def test_include_with_no_filter_is_valid(self):
+        doc = includes_doc([{"repo": "https://other.example/logos-repo.json"}])
+        self.assertEqual(index.validate_includes_doc(doc), [])
+
+    def test_bare_names_and_objects_both_validate(self):
+        doc = includes_doc([
+            {"repo": "https://a.example/logos-repo.json",
+             "packages": ["chat_module"]},
+            {"repo": "https://b.example/logos-repo.json",
+             "packages": [{"name": "storage_module", "rootHash": "ab12"}]},
+        ])
+        self.assertEqual(index.validate_includes_doc(doc), [])
+
+    def test_missing_includes_key_is_reported(self):
+        self.assertTrue(any("'includes'" in i
+                            for i in index.validate_includes_doc({"schemaVersion": 1})))
+
+    def test_repo_must_be_https(self):
+        doc = includes_doc([{"repo": "http://a.example/logos-repo.json"}])
+        self.assertTrue(any("https" in i
+                            for i in index.validate_includes_doc(doc)))
+
+    def test_repo_is_required(self):
+        doc = includes_doc([{"packages": ["x"]}])
+        self.assertTrue(any("'repo'" in i
+                            for i in index.validate_includes_doc(doc)))
+
+    # Naming the index instead of the identity card resolves to nothing, and
+    # looks exactly like an unreachable catalog when it does.
+    def test_pointing_at_the_owning_index_url_is_caught(self):
+        doc = includes_doc([{"repo": OWN_INDEX}])
+        self.assertEqual(index.validate_includes_doc(doc), [])
+        self.assertTrue(any("indexUrl" in i for i in
+                            index.validate_includes_doc(doc, index_url=OWN_INDEX)))
+
+    def test_self_reference_is_caught_when_the_url_is_known(self):
+        doc = includes_doc([{"repo": OWN_REPO}])
+        self.assertEqual(index.validate_includes_doc(doc), [])
+        self.assertTrue(any("itself" in i for i in
+                            index.validate_includes_doc(doc, self_url=OWN_REPO)))
+
+    def test_duplicate_includes_are_caught(self):
+        url = "https://a.example/logos-repo.json"
+        doc = includes_doc([{"repo": url}, {"repo": url}])
+        self.assertTrue(any("duplicate" in i
+                            for i in index.validate_includes_doc(doc)))
+
+    # An empty list is not "take everything" — that is what omitting the field
+    # means. Silently following it would cost two round-trips for no packages.
+    def test_empty_packages_list_is_an_error_not_a_wildcard(self):
+        doc = includes_doc([{"repo": "https://a.example/logos-repo.json",
+                             "packages": []}])
+        self.assertTrue(any("selects" in i
+                            for i in index.validate_includes_doc(doc)))
+
+    def test_unknown_fields_are_reported(self):
+        doc = includes_doc([{"repo": "https://a.example/logos-repo.json",
+                             "mirror": True}])
+        self.assertTrue(any("mirror" in i
+                            for i in index.validate_includes_doc(doc)))
+
+    def test_malformed_selectors_are_reported(self):
+        doc = includes_doc([{"repo": "https://a.example/logos-repo.json",
+                             "packages": [42, {"version": "1.0.0"}]}])
+        self.assertEqual(len(index.validate_includes_doc(doc)), 2)
+
+
+class ValidateIncludesRanges(unittest.TestCase):
+    @requires_lgx
+    def test_well_formed_ranges_pass(self):
+        doc = includes_doc([{"repo": "https://a.example/logos-repo.json",
+                             "packages": [{"name": "m", "version": "^0.2.0"},
+                                          {"name": "n", "version": "2.1.0"},
+                                          {"name": "o", "version": ">=1.0.0 <2.0.0"}]}])
+        self.assertEqual(index.validate_includes_doc(doc), [])
+
+    @requires_lgx
+    def test_malformed_range_is_reported(self):
+        doc = includes_doc([{"repo": "https://a.example/logos-repo.json",
+                             "packages": [{"name": "m", "version": "1..2"}]}])
+        self.assertTrue(any("well-formed range" in i
+                            for i in index.validate_includes_doc(doc)))
+
+    # Ranges are judged by `lgx semver valid-range`, the same implementation
+    # the clients use. Without lgx the structural checks must still run —
+    # dying there would make the gate unusable wherever lgx isn't installed.
+    def test_ranges_go_unchecked_without_lgx(self):
+        doc = includes_doc([{"repo": "https://a.example/logos-repo.json",
+                             "packages": [{"name": "m", "version": "1..2"}]}])
+        real = index._lgx_has_semver
+        index._lgx_has_semver = lambda: False
+        try:
+            self.assertEqual(index.validate_includes_doc(doc), [])
+        finally:
+            index._lgx_has_semver = real

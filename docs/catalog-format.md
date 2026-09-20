@@ -36,6 +36,7 @@ publishers and the clients that consume catalogs — `lgpd`, the
 8. [Fields the client synthesises at read time](#8-fields-the-client-synthesises-at-read-time)
 9. [Schema versioning and compatibility](#9-schema-versioning-and-compatibility)
 10. [Producing and validating an index](#10-producing-and-validating-an-index)
+11. [Drawing from other catalogs (the includes document)](#11-drawing-from-other-catalogs-the-includes-document)
 
 ---
 
@@ -68,7 +69,10 @@ A client installs a package by walking this chain:
 
 1. A client is pointed at a **`logos-repo.json` URL** (the built-in default,
    or one a user added). Multiple repos can be configured at once; the
-   client merges them into a single catalog.
+   client merges them into a single catalog. A catalog can also draw packages
+   from **other catalogs**, through an `includesUrl` naming a document that
+   lists them (§11) — the client follows those at step 1 and folds their
+   packages into the including catalog's listing.
 2. The client reads `indexUrl` from that file and fetches the
    **`index.json`** it points to.
 3. To install a package the client picks a version, downloads the `.lgx`
@@ -126,6 +130,7 @@ through it.
 | `description` | string | no | One-line human description. Defaults to empty. |
 | `homepage` | string | no | Informational URL (project page, docs). Defaults to empty. |
 | `trustedSigners` | array | no | Signer identities this catalog vouches for. See §2.3. Defaults to empty. |
+| `includesUrl` | string | no | Absolute URL of the **includes document**, listing the other catalogs this one draws packages from. See §11. Absent means it draws from none. |
 | `schemaVersion` | number | no* | Format version. See §2.4. |
 
 A client that can't fetch or parse `logos-repo.json`, or that is missing
@@ -434,10 +439,12 @@ on-disk `index.json` and must **not** be written into it:
 
 | Synthesised field | Source |
 |---|---|
-| `repositoryUrl` | the `logos-repo.json` URL the index came from |
-| `repositoryName` | the repo's `name` (per-package, not the index header) |
-| `repositoryDisplayName` | the repo's `displayName` |
-| `description`, `type`, `category`, `author`, `icon` (at the **package** level) | lifted from `versions[0].manifest` |
+| `repositoryUrl` | the `logos-repo.json` URL of the repository the user **configured** — for an included package, the including catalog, not the origin (§11) |
+| `repositoryName` | that repo's `name` (per-package, not the index header) |
+| `repositoryDisplayName` | that repo's `displayName` |
+| `originRepositoryUrl`, `originRepositoryName`, `originRepositoryDisplayName` | the catalog that actually **publishes** the package. Equal to the `repository*` trio unless the package arrived through an include. Also stamped on every `versions[]` entry, since a merged package can draw versions from several catalogs |
+| `iconUrl` (on a **version** entry) | `versions[].icon.path` resolved against the `indexUrl` that published *that version* |
+| `description`, `type`, `category`, `author`, `icon` (at the **package** level) | lifted from `versions[0].manifest` **after** merging and sorting |
 | `topLevel` (on dependency-resolution output) | added by the resolver to mark caller-requested vs. transitive packages |
 
 If you see these in client output or API responses, they're runtime
@@ -459,6 +466,11 @@ additions — your `index.json` should contain only the fields documented in
 - **A major bump signals a breaking change** to required fields or their
   meaning. Don't change the meaning of an existing field in place; add a
   new one and bump the version.
+- **`includesUrl` is an optional field, and therefore invisible to a client
+  that predates it.** That client sees only the catalog's own packages. An
+  aggregate-only catalog reads to it as **empty**, and a curated one as
+  **partial** — gracefully, but with nothing on screen to say so. Weigh that
+  before publishing a catalog whose whole content is drawn from elsewhere.
 - **Be liberal in what you accept.** The reference client is null-safe and
   defensive: `manifest: null` rows from early generators don't crash it,
   unparseable repos are dropped (not fatal), and missing optional fields
@@ -502,7 +514,177 @@ nix build github:logos-co/logos-package#lgx
 `logos-repo.json`, by contrast, *is* hand-edited — copy the example in §2.1,
 set `name` / `displayName` / `indexUrl` to your catalog, and add your
 `trustedSigners`. See the [`logos-modules-release-base`](https://github.com/logos-co/logos-modules-release-base)
-fork-me template for a full catalog skeleton.
+fork-me template for a full catalog skeleton. So is the includes document
+(§11). Both have their own check:
+
+```bash
+./index.py validate-repo logos-repo.json --self-url https://example.com/logos-repo.json
+./index.py validate-includes includes.json \
+    --self-url  https://example.com/logos-repo.json \
+    --index-url https://example.com/index.json
+```
+
+---
+
+## 11. Drawing from other catalogs (the includes document)
+
+A catalog does not have to publish everything it lists. A third document names
+other catalogs it draws packages from, so one entry in a user's repository list
+can stand for a curated bundle, an umbrella over several team catalogs, or a
+stable set mixed with something under test.
+
+**It is reached from `logos-repo.json`, never from `index.json`.** That is
+deliberate: `index.json` is regenerated wholesale on every publish and on a
+cron, from whatever release assets exist, so a hand-authored entry there would
+be destroyed on the next rebuild. Keeping composition on the identity-card side
+means the index format is untouched — no `schemaVersion` bump, no generator
+change, no pipeline change — and an include stays what it actually is, a
+statement about which catalogs this one vouches for.
+
+**And the card points rather than carries.** `logos-repo.json` holds an
+`includesUrl`; the document there holds the list. The same split `indexUrl`
+already makes, for the same reason (§1): the identity card changes almost never
+and can sit in a git repo's raw view, while what a catalog composes from moves
+on its own cadence, may be generated rather than written, and can be served
+from somewhere else entirely.
+
+### 11.1 Example
+
+```json
+// logos-repo.json
+{
+  "schemaVersion": 1,
+  "name": "my-distro",
+  "displayName": "My Distro",
+  "indexUrl":    "https://example.com/my-distro/index.json",
+  "includesUrl": "https://example.com/my-distro/includes.json",
+  "trustedSigners": []
+}
+```
+
+```json
+// includes.json — what includesUrl points at
+{
+  "schemaVersion": 1,
+  "includes": [
+    { "repo": "https://raw.githubusercontent.com/logos-co/logos-modules-release/refs/heads/main/logos-repo.json" },
+
+    { "repo": "https://example.org/team-a/logos-repo.json",
+      "packages": ["chat_module", "waku_module"] },
+
+    { "repo": "https://example.org/team-b/logos-repo.json",
+      "packages": [
+        { "name": "storage_module",    "version": "2.1.0" },
+        { "name": "blockchain_module", "version": "^0.2.0" },
+        { "name": "delivery_module",   "rootHash": "ab12…" }
+      ] }
+  ]
+}
+```
+
+The wrapper is not ceremony: it is what makes the document versionable and
+extensible, the way every other file here is. A bare array could gain neither.
+`schemaVersion` is advisory, as in the other two documents (§2.4) — no client
+in this format gates on one.
+
+There is **no inline form**. A catalog that draws from others publishes this
+document; one that does not omits `includesUrl` entirely.
+
+### 11.2 Field reference
+
+Top level of the includes document:
+
+| Field | Type | Required | Meaning |
+|---|---|:--:|---|
+| `includes` | array | **yes** | The catalogs this one draws from. May be empty, which is the same as publishing no document at all. |
+| `schemaVersion` | number | no | Format version, advisory. See §2.4 — the same convention as `logos-repo.json`. |
+
+Each `includes[]` element:
+
+| Field | Type | Required | Meaning |
+|---|---|:--:|---|
+| `repo` | string | **yes** | Absolute `https://` URL of the included catalog's **`logos-repo.json`** — the identity card, not the index. Going through it is what gives the include a name, a display name and a place to record its own errors. |
+| `packages` | array | no | Omitted means **the whole catalog**. Present means only these. An explicit `[]` is an error, not a wildcard. |
+
+Each `packages[]` element is either a bare package name — every version of
+that package — or an object:
+
+| Field | Type | Required | Meaning |
+|---|---|:--:|---|
+| `name` | string | **yes** | Canonical package name, as in the origin's `index.json`. |
+| `version` | string | no | npm-style range, the same dialect §6 describes. A bare `"2.1.0"` is an exact pin. Omitted means every version. |
+| `rootHash` | string | no | Pin one specific build, the way `--root-hash` does at download time (§6). |
+
+Two selectors naming one package **union** rather than intersect. Within one
+selector, `version` and `rootHash` both have to hold.
+
+### 11.3 How a client resolves them
+
+Resolution happens **at fetch time**, not at publish time: the composed
+catalog stays current as its sources publish, without republishing anything.
+The client reads `includesUrl`, then follows each `repo` in the document it
+finds, reads that catalog's `logos-repo.json` and `index.json`, applies the
+filter, and folds the result into the including catalog's listing. An included
+catalog may carry its own `includesUrl`; that is how the graph goes deeper than
+one level.
+
+Nothing is re-hosted. An included version keeps the `url`, `rootHash` and
+`signature` the origin published, so it is downloaded from — and verified
+against — the catalog that actually built it.
+
+**The walk is bounded**, because a catalog is third-party input: the reference
+client follows at most 4 levels and 32 catalogs per configured repository, and
+refuses an include that would cycle back on a catalog already on the path. A
+diamond — two includes that both reach the same catalog — still resolves; only
+a true cycle stops. Caps and cycles are reported, not silently obeyed.
+
+**Failures degrade.** An include that cannot be fetched or parsed is recorded
+against the including catalog and skipped. It never takes that catalog's own
+packages down with it, matching the same best-effort rule that governs
+configured repositories.
+
+That covers the **document** as much as the catalogs it names: an absent or
+unreadable includes document, a non-https `includesUrl`, unparseable JSON, a
+bare array where the object belongs, or an object with no `includes` key all
+produce a warning and no includes — never a dropped repository. An unreadable
+composition list says nothing about what the catalog itself publishes. Clients
+should report the declared `includesUrl` whether or not anything resolved from
+it, so a catalog that meant to draw from others is distinguishable from one
+that never tried.
+
+### 11.4 Merging, and who wins
+
+Entries naming the same package are reduced to one. Precedence is the
+catalog's own `index.json` first, then `includes[]` in declared order,
+shallower before deeper.
+
+- **Versions union.** Two catalogs offering different versions of one package
+  is the point; the merged entry lists both, re-sorted by §6 precedence.
+- **The local copy wins a true collision.** Same package, same *version*, two
+  catalogs — the earlier contributor keeps it. The loser is reported by the
+  client's refresh operation rather than dropped silently: a shadowed version
+  is invisible in the catalog itself, and an include that contributed nothing
+  must not read the same as one that worked.
+- **Package-level fields follow `versions[0]` after the merge** (§8). With
+  several catalogs contributing, "first in the file" stops being a meaningful
+  source for a description or an icon.
+
+### 11.5 What this is not
+
+- **Not a mirror.** Nothing is copied. If the origin unpublishes a version,
+  it disappears from every catalog that included it.
+- **Not a client-side repository list.** A user configuring several catalogs
+  is a separate, existing mechanism (§1). Those merge side by side and never
+  shadow one another; an include merges *into* the catalog that declared it.
+- **Not part of `index.json`.** The index is generated; this document is
+  hand-edited. They are separate files with separate lifecycles, and the index
+  is untouched by this feature.
+- **Not a way to remove things.** There is no `exclude`. An include is
+  additive; a catalog that wants a subset names the subset.
+- **Not free of trust.** An include delegates: the included catalog's
+  operator decides what appears under yours. Clients offer an opt-out
+  (`--no-includes`), and a package's `origin*` fields (§8) say where it really
+  came from.
 
 ---
 
@@ -513,8 +695,17 @@ fork-me template for a full catalog skeleton.
 ```
 name*          displayName*          indexUrl*           ← required
 description    homepage              trustedSigners[]    ← optional
+includesUrl                                              ← optional, §11
 schemaVersion (advisory, =1)
 trustedSigners[] = { did*, name? }
+```
+
+**includes document** — what `includesUrl` points at, hand-edited, `schemaVersion: 1`:
+
+```
+schemaVersion (advisory, =1)   includes[]*
+includes[]   = { repo*, packages? }
+packages[]   = "<name>" | { name*, version?, rootHash? }
 ```
 
 **`index.json`** — package listing, generated, `schemaVersion: 2`:

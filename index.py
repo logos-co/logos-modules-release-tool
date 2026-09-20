@@ -23,6 +23,16 @@
 #   ./index.py show     <index.json> <package>
 #   ./index.py validate <index.json> [--full] [--pairs-file FILE]
 #                                           [--with-local URL PATH ...] [--fetch {missing,all,none}]
+#   ./index.py validate-repo     <logos-repo.json> [--self-url URL]
+#   ./index.py validate-includes <includes.json> [--self-url URL]
+#                                                [--index-url URL]
+#
+# These check the catalog's other two files — the hand-edited ones. A catalog
+# draws packages from other catalogs through `includesUrl` in logos-repo.json
+# and the document it points at; the client treats a malformed include as a
+# warning rather than a failure, so users of a broken catalog still get the
+# rest of it. The cost of that leniency is that a typo silently costs the
+# catalog some of its packages. This is where it gets caught.
 #
 # Input file format (urls-file / --from-file / --pairs-file): one entry
 # per line, either `<url>` or `<url> <local-path>` (whitespace-separated).
@@ -1131,6 +1141,211 @@ def _validate_entry_against_file(
     return issues
 
 
+# ── logos-repo.json validation ───────────────────────────────────────────
+#
+# The identity card is hand-edited, and `includes[]` made it load-bearing: a
+# typo there silently costs a catalog some of its packages rather than failing
+# anything. The client is deliberately lenient (a malformed include entry is a
+# warning, not a parse failure), which is a safety net for users — not a reason
+# for a publisher to ship one. This is the gate that catches it at authoring
+# time.
+
+def _valid_range(rng: str) -> bool | None:
+    """True/False if `lgx semver valid-range` can judge the range, None when
+    there is no lgx on PATH to ask. Degrades rather than dying, the same way
+    check_version_order does: a structural check of logos-repo.json is still
+    worth running without lgx installed."""
+    if not _lgx_has_semver():
+        return None
+    r = subprocess.run(["lgx", "semver", "valid-range", rng],
+                       capture_output=True)
+    return r.returncode == 0
+
+
+def _validate_selector(where: str, sel: object,
+                       unchecked_ranges: list[str]) -> list[str]:
+    issues: list[str] = []
+    if isinstance(sel, str):
+        if not sel.strip():
+            issues.append(f"{where}: selector is an empty name")
+        return issues
+    if not isinstance(sel, dict):
+        issues.append(f"{where}: selector must be a package name or an object "
+                      f"with a 'name', got {type(sel).__name__}")
+        return issues
+    name = sel.get("name")
+    if not isinstance(name, str) or not name.strip():
+        issues.append(f"{where}: selector has no non-empty string 'name'")
+    for key in ("version", "rootHash"):
+        if key in sel and not isinstance(sel[key], str):
+            issues.append(f"{where}: '{key}' must be a string")
+    rng = sel.get("version")
+    if isinstance(rng, str) and rng:
+        verdict = _valid_range(rng)
+        if verdict is False:
+            issues.append(f"{where}: 'version' is not a well-formed range: {rng!r}")
+        elif verdict is None:
+            unchecked_ranges.append(rng)
+    for key in sel:
+        if key not in ("name", "version", "rootHash"):
+            issues.append(f"{where}: unknown selector field {key!r}")
+    return issues
+
+
+def validate_repo_doc(doc: dict, self_url: str | None = None) -> list[str]:
+    """Structural issues in a logos-repo.json. Empty list means OK."""
+    issues: list[str] = []
+
+    for key in ("name", "displayName", "indexUrl"):
+        value = doc.get(key)
+        if not isinstance(value, str) or not value.strip():
+            issues.append(f"missing or empty required string field {key!r}")
+    for key in ("description", "homepage"):
+        if key in doc and not isinstance(doc[key], str):
+            issues.append(f"{key!r} must be a string")
+
+    index_url = doc.get("indexUrl")
+    if isinstance(index_url, str) and index_url and not index_url.startswith("https://"):
+        issues.append(f"'indexUrl' must be an https URL: {index_url!r}")
+
+    signers = doc.get("trustedSigners", [])
+    if not isinstance(signers, list):
+        issues.append("'trustedSigners' must be an array")
+    else:
+        for i, signer in enumerate(signers):
+            if not isinstance(signer, dict) or not isinstance(signer.get("did"), str):
+                issues.append(f"trustedSigners[{i}]: needs a string 'did'")
+
+    # The card POINTS at the includes list; it never carries it. Check the
+    # document itself with validate-includes.
+    if "includes" in doc:
+        issues.append("'includes' is not a field of logos-repo.json — the list "
+                      "lives in the document 'includesUrl' points at")
+    includes_url = doc.get("includesUrl")
+    if includes_url is not None:
+        if not isinstance(includes_url, str) or not includes_url.strip():
+            issues.append("'includesUrl' must be a non-empty string")
+        else:
+            if not includes_url.startswith("https://"):
+                issues.append("'includesUrl' must be an https URL: "
+                              f"{includes_url!r}")
+            if includes_url == index_url:
+                issues.append("'includesUrl' is this catalog's own indexUrl")
+            if self_url and includes_url == self_url:
+                issues.append("'includesUrl' points at this logos-repo.json")
+    return issues
+
+
+def validate_includes_doc(doc: dict, self_url: str | None = None,
+                          index_url: str | None = None) -> list[str]:
+    """Structural issues in an includes document. Empty list means OK.
+
+    `self_url` is the owning catalog's logos-repo.json URL and `index_url` its
+    indexUrl, when the caller knows them — both catch an include that names the
+    catalog it belongs to, which resolves to nothing and reads afterwards like
+    an unreachable catalog."""
+    issues: list[str] = []
+
+    includes = doc.get("includes")
+    if not isinstance(includes, list):
+        return ["missing or non-array 'includes'"]
+
+    unchecked_ranges: list[str] = []
+    seen: dict[str, int] = {}
+    for i, inc in enumerate(includes):
+        where = f"includes[{i}]"
+        if not isinstance(inc, dict):
+            issues.append(f"{where}: must be an object")
+            continue
+        repo = inc.get("repo")
+        if not isinstance(repo, str) or not repo.strip():
+            issues.append(f"{where}: needs a non-empty string 'repo'")
+        else:
+            if not repo.startswith("https://"):
+                issues.append(f"{where}: 'repo' must be an https URL: {repo!r}")
+            # Pointing at an index instead of an identity card resolves to
+            # nothing, and looks like an unreachable catalog when it does.
+            if index_url and repo == index_url:
+                issues.append(f"{where}: 'repo' is this catalog's own indexUrl — "
+                              "it must name the other catalog's logos-repo.json")
+            if self_url and repo == self_url:
+                issues.append(f"{where}: 'repo' is this catalog itself")
+            if repo in seen:
+                issues.append(f"{where}: duplicate of includes[{seen[repo]}] "
+                              f"({repo})")
+            else:
+                seen[repo] = i
+        for key in inc:
+            if key not in ("repo", "packages"):
+                issues.append(f"{where}: unknown field {key!r}")
+        if "packages" not in inc:
+            continue  # no filter: the whole catalog
+        packages = inc["packages"]
+        if not isinstance(packages, list):
+            issues.append(f"{where}: 'packages' must be an array")
+            continue
+        if not packages:
+            issues.append(f"{where}: 'packages' is empty — the include selects "
+                          "nothing. Drop it, or omit 'packages' to take the "
+                          "whole catalog.")
+            continue
+        for j, sel in enumerate(packages):
+            issues.extend(_validate_selector(f"{where}.packages[{j}]", sel,
+                                             unchecked_ranges))
+
+    if unchecked_ranges:
+        warn(f"{len(unchecked_ranges)} version range(s) left unchecked: `lgx` is "
+             "missing or has no `semver` subcommand")
+    return issues
+
+
+def _load_json_object(path: pathlib.Path, what: str) -> dict:
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        die(f"no such file: {path}")
+    except json.JSONDecodeError as exc:
+        die(f"{path}: not valid JSON: {exc}")
+    if isinstance(doc, list):
+        # Worth naming: the includes list used to sit inline, so a bare array
+        # is exactly what a hand-written document ends up being when the
+        # wrapper is forgotten.
+        die(f"{path}: {what} must be a JSON object, not a bare array "
+            f'(wrap it: {{"schemaVersion": 1, "includes": [ ... ]}})')
+    if not isinstance(doc, dict):
+        die(f"{path}: {what} must be a JSON object")
+    return doc
+
+
+def _report(path: pathlib.Path, issues: list[str], ok_line: str,
+            what: str) -> int:
+    if not issues:
+        print(f"{path}: {ok_line}")
+        return 0
+    for problem in issues:
+        print(f"{path}: {problem}")
+    print(f"\n{len(issues)} issue(s) — {what} failed validation", file=sys.stderr)
+    return 1
+
+
+def cmd_validate_repo(args: argparse.Namespace) -> int:
+    path = pathlib.Path(args.repo_json)
+    doc = _load_json_object(path, "logos-repo.json")
+    issues = validate_repo_doc(doc, args.self_url)
+    has = "includesUrl" in doc
+    return _report(path, issues,
+                   "OK" + (" (draws from other catalogs)" if has else ""),
+                   "logos-repo.json")
+
+
+def cmd_validate_includes(args: argparse.Namespace) -> int:
+    path = pathlib.Path(args.includes_json)
+    doc = _load_json_object(path, "the includes document")
+    issues = validate_includes_doc(doc, args.self_url, args.index_url)
+    n = len(doc.get("includes") or []) if isinstance(doc.get("includes"), list) else 0
+    return _report(path, issues, f"OK ({n} include(s))", "includes document")
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     index_path = pathlib.Path(args.index)
     index = load_index(index_path)
@@ -1284,6 +1499,26 @@ def build_parser() -> argparse.ArgumentParser:
                          "must match index entry `url` fields exactly.")
     _add_pair_flags(pv)
     pv.set_defaults(func=cmd_validate)
+
+    pr2 = sub.add_parser("validate-repo",
+                         help="structural check of a logos-repo.json")
+    pr2.add_argument("repo_json", help="logos-repo.json path")
+    pr2.add_argument("--self-url", default=None,
+                     help="the URL this logos-repo.json is published at")
+    pr2.set_defaults(func=cmd_validate_repo)
+
+    pi = sub.add_parser("validate-includes",
+                        help="structural check of the document "
+                             "`includesUrl` points at")
+    pi.add_argument("includes_json", help="includes document path")
+    pi.add_argument("--self-url", default=None,
+                    help="the owning catalog's logos-repo.json URL, so an "
+                         "include naming that catalog itself can be caught")
+    pi.add_argument("--index-url", default=None,
+                    help="the owning catalog's indexUrl, so an include "
+                         "pointing at an index instead of an identity card "
+                         "can be caught")
+    pi.set_defaults(func=cmd_validate_includes)
 
     return p
 
