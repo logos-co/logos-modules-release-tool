@@ -227,5 +227,25 @@ class TestSidecar(unittest.TestCase):
         with mock.patch.object(index, "download", fake_download):
             self.assertEqual(index.fetch_sidecar(LGX_URL).get("cid", ""), "")
 
+
+class TestCidFromSidecar(unittest.TestCase):
+
+    def test_keeps_the_cid_when_sha256_matches(self):
+        sidecar = {"sha256": "abc", "cid": "zDvZRw"}
+        self.assertEqual(index.cid_from_sidecar(LGX_URL, "abc", sidecar), "zDvZRw")
+
+    def test_drops_the_cid_when_sha256_differs(self):
+        sidecar = {"sha256": "other", "cid": "zDvZRw"}
+        self.assertEqual(index.cid_from_sidecar(LGX_URL, "abc", sidecar), "")
+
+    def test_drops_the_cid_when_sha256_is_absent(self):
+        sidecar = {"cid": "zDvZRw"}
+        self.assertEqual(index.cid_from_sidecar(LGX_URL, "abc", sidecar), "")
+
+    def test_drops_a_cid_that_is_not_a_string(self):
+        sidecar = {"sha256": "abc", "cid": None}
+        self.assertEqual(index.cid_from_sidecar(LGX_URL, "abc", sidecar), "")
+
+
 if __name__ == "__main__":
     unittest.main()

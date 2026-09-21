@@ -480,6 +480,17 @@ def fetch_sidecar(lgx_url: str) -> dict:
     return sidecar
 
 
+def cid_from_sidecar(lgx_url: str, sha256: str, sidecar: dict) -> str:
+    """The sidecar's CID, or "" unless its sha256 matches the package."""
+    cid = sidecar.get("cid")
+    if not isinstance(cid, str) or not cid.strip():
+        return ""
+    if sidecar.get("sha256") != sha256:
+        warn(f"{lgx_url}: sidecar sha256 does not match the package, dropping its CID")
+        return ""
+    return cid.strip()
+
+
 def version_entry_from_lgx(
     url: str,
     lgx_path: pathlib.Path,
@@ -569,14 +580,6 @@ def version_entry_from_lgx(
     if icon is not None:
         entry["icon"] = icon
 
-    sidecar = fetch_sidecar(url)
-    sidecar_sha = str(sidecar.get("sha256", "")).strip()
-    if sidecar_sha and sidecar_sha != sha256:
-        warn(f"{url}: sidecar sha256 does not match the package, dropping its CID")
-        cid = ""
-    else:
-        cid = str(sidecar.get("cid", "")).strip()
-    entry["urls"] = [f"logos:{cid}", url] if cid else [url]
     return name, entry
 
 
@@ -659,7 +662,12 @@ def fetch_entry(
     `version_entry_from_lgx` stays one code path regardless of where
     the bytes came from."""
     lgx_path, released_at = resolve_lgx(url, local_path, fetch_mode, workdir)
-    return version_entry_from_lgx(url, lgx_path, released_at, icons_dir, icons_rel)
+    name, entry = version_entry_from_lgx(url, lgx_path, released_at, icons_dir, icons_rel)
+
+    if fetch_mode != "none":
+        cid = cid_from_sidecar(url, entry["sha256"], fetch_sidecar(url))
+        entry["urls"] = [f"logos:{cid}", url] if cid else [url]
+    return name, entry
 
 
 # ── index mutation helpers ───────────────────────────────────────────────
@@ -1161,6 +1169,13 @@ def _validate_entry_against_file(
         issues.append(
             f"{pkg_name} v{idx_manifest.get('version', '?')}: size mismatch "
             f"({entry['size']} vs {observed.get('size')})"
+        )
+
+    if "urls" in entry and "urls" in observed \
+            and set(entry["urls"]) != set(observed["urls"]):
+        issues.append(
+            f"{pkg_name} v{idx_manifest.get('version', '?')}: urls mismatch "
+            f"({entry['urls']} vs {observed['urls']})"
         )
     return issues
 
