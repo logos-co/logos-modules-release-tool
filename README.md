@@ -32,8 +32,10 @@ nix build github:logos-co/logos-package#lgx
 # Or grab a pre-built release: https://github.com/logos-co/logos-package/releases
 ```
 
-`remove`, `list`, `show`, and `validate` (without `--full`) are pure JSON
-operations — no `lgx` needed and no network traffic.
+`remove`, `list`, `show`, `validate` (without `--full`), `validate-repo` and
+`validate-includes` are pure JSON operations — no network traffic.
+`validate-includes` asks `lgx` to judge version ranges when it is on PATH, and
+reports them as unchecked rather than failing when it is not.
 
 ## Subcommands
 
@@ -47,6 +49,8 @@ index.py list     <index.json>
 index.py show     <index.json> <package>
 index.py validate <index.json> [--full] [--pairs-file FILE]
                                       [--with-local URL PATH ...] [--fetch {missing,all,none}]
+index.py validate-repo     <logos-repo.json> [--self-url URL]
+index.py validate-includes <includes.json>   [--self-url URL] [--index-url URL]
 ```
 
 ### `build` — full rebuild from a URL list
@@ -103,6 +107,33 @@ install time — `rootHash`, manifest fields, signer DID, `sha256`, `size`,
 plus `urls`.
 Both modes report **every** problem found in a single run and exit
 non-zero on any.
+
+### `validate-repo`, `validate-includes` — check the hand-edited files
+
+```bash
+./index.py validate-repo logos-repo.json --self-url https://example.com/logos-repo.json
+
+./index.py validate-includes includes.json \
+    --self-url  https://example.com/logos-repo.json \
+    --index-url https://example.com/index.json
+```
+
+`index.json` is generated; the catalog's other two files are written by hand.
+`logos-repo.json` is the identity card, and `includesUrl` on it points at the
+**includes document** listing the other catalogs yours draws packages from
+([catalog-format §11](docs/catalog-format.md#11-drawing-from-other-catalogs-the-includes-document)).
+That made both load-bearing. The client is deliberately lenient about them: a
+malformed include is a warning, not a parse failure, so users of a broken
+catalog still get the rest of it. The cost of that leniency is that a typo
+quietly costs your catalog some of its packages. This is where it gets caught
+instead.
+
+`validate-repo` checks required fields, https URLs, `trustedSigners` shape, and
+that `includesUrl` is a URL rather than an inlined list. `validate-includes`
+checks the document: the `includes` array, and per entry a well-formed `repo`,
+no duplicates, no pointing at your own catalog (that is what the two optional
+URL flags are for), selector shapes, and `version` ranges via
+`lgx semver valid-range`. Run both in CI — `logos-modules-release-base` does.
 
 ## Input file format
 
