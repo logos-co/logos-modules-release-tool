@@ -99,7 +99,8 @@ dropped automatically (clients never need to see empty entries).
 
 `validate --full` enforces the same index↔file bindings the client
 (`verifyDownloadAgainstIndex` in `package_downloader_lib.cpp`) enforces at
-install time — `rootHash`, manifest fields, signer DID, `sha256`, `size`.
+install time — `rootHash`, manifest fields, signer DID, `sha256`, `size`,
+plus `urls`.
 Both modes report **every** problem found in a single run and exit
 non-zero on any.
 
@@ -128,6 +129,10 @@ Apply to `build`, `add`, and `validate --full`:
 | `missing` *(default)* | Use the paired local file if one was supplied; otherwise download. |
 | `all` | Always download. Local paths are noted but ignored. |
 | `none` | Never download. Every URL must have a local pairing or it's an error. |
+
+Except with `none`, each entry gets a `urls` list. It holds a `logos:<cid>`
+source when the `sidecar.json` next to the `.lgx` has a `cid` and a `sha256`
+equal to the package's. The sidecar is downloaded even when the `.lgx` is local.
 
 ## Catalog format
 

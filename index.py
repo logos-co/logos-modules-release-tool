@@ -10,7 +10,7 @@
 # the package-manager UI) consume the output unchanged.
 #
 # Per-version entry format mirrors build_index.py:
-#   { releasedAt, publisherRef, url, size, sha256, rootHash,
+#   { releasedAt, publisherRef, url, urls?, size, sha256, rootHash,
 #     manifest, signature? }
 #
 # Usage:
