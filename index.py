@@ -35,7 +35,7 @@
 # catalog some of its packages. This is where it gets caught.
 #
 # Input file format (urls-file / --from-file / --pairs-file): one entry
-# per line, either `<url>` or `<url> <local-path>` (whitespace-separated).
+# per line, `[logos:<cid>] <url> [<local-path>]` (whitespace-separated).
 # Blank lines and `#` comments are ignored.
 #
 # Fetch modes (build / add / validate --full):
@@ -254,15 +254,16 @@ def resolve_repo_name(cli_name: str | None) -> str:
 
 # ── URL list parsing ─────────────────────────────────────────────────────
 
-def read_url_pairs(path: pathlib.Path) -> list[tuple[str, str | None]]:
-    """One entry per line, either `<url>` or `<url> <local-path>`.
+def read_url_pairs(path: pathlib.Path) -> list[tuple[str, str | None, list[str]]]:
+    """One entry per line: `[logos:<cid>] <url> [<local-path>]`.
     Blank lines and `#` comments are ignored; an inline ` #...` trailing
     comment is stripped too — common shell-style file convention.
 
-    Returns a list of (url, local_path) tuples in file order, with
+    Returns a list of (url, local_path, urls) tuples in file order, with
+    `urls` holding the `logos:` source (if any) then `url`, and
     `local_path = None` for URL-only lines. Backwards-compatible with
-    the historical single-URL-per-line files."""
-    pairs: list[tuple[str, str | None]] = []
+    the historical `<url> [<local-path>]` files."""
+    pairs: list[tuple[str, str | None, list[str]]] = []
     for raw in path.read_text(encoding="utf-8").splitlines():
         # Strip an inline comment if present, but only when preceded by
         # whitespace — URLs never contain `#` followed by whitespace and
@@ -274,20 +275,33 @@ def read_url_pairs(path: pathlib.Path) -> list[tuple[str, str | None]]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+
+        cid_url = None
+        if line.startswith("logos:"):
+            toks = line.split(None, 1)
+
+            if toks[0] == "logos:":
+                die(f"{path}: no CID after logos:")
+            if len(toks) < 2:
+                die(f"{path}: no downloadable URL after {toks[0]}")
+
+            cid_url = toks[0]
+            line = toks[1]
         # `.split(None, 1)` splits on the first run of whitespace,
         # keeping any further whitespace inside the path token intact
         # (rare, but URLs and paths are user-supplied so don't lose it).
         toks = line.split(None, 1)
         url = toks[0]
         local_path = toks[1].strip() if len(toks) > 1 else None
-        pairs.append((url, local_path))
+        urls = [cid_url, url] if cid_url else [url]
+        pairs.append((url, local_path, urls))
     return pairs
 
 
 def merge_cli_pairs(
-    file_pairs: list[tuple[str, str | None]],
+    file_pairs: list[tuple[str, str | None, list[str]]],
     cli_with_local: list[list[str]] | None,
-) -> list[tuple[str, str | None]]:
+) -> list[tuple[str, str | None, list[str]]]:
     """Apply `--with-local URL PATH` overrides to a list of file pairs,
     preserving file order. A CLI pair whose URL is already present
     UPDATES the entry's local path; a CLI pair with a new URL is
@@ -298,13 +312,13 @@ def merge_cli_pairs(
         return list(file_pairs)
     cli_map = {url: path for url, path in cli_with_local}
     seen: set[str] = set()
-    out: list[tuple[str, str | None]] = []
-    for url, p in file_pairs:
-        out.append((url, cli_map.get(url, p)))
+    out: list[tuple[str, str | None, list[str]]] = []
+    for url, p, urls in file_pairs:
+        out.append((url, cli_map.get(url, p), urls))
         seen.add(url)
     for url, p in cli_with_local:
         if url not in seen:
-            out.append((url, p))
+            out.append((url, p, [url]))
             seen.add(url)
     return out
 
@@ -462,43 +476,6 @@ def emit_icon_sidecar(
         "sha256": digest,
         "size": len(data),
     }
-
-
-def fetch_sidecar(lgx_url: str) -> dict:
-    """Fetch the `sidecar.json` published beside a package.
-    Returns empty object {} on failure.
-     """
-    if not lgx_url.startswith(("http://", "https://")):
-        return {}
-
-    url = lgx_url.rsplit("/", 1)[0] + "/sidecar.json"
-
-    with tempfile.TemporaryDirectory(prefix="logos-index-") as tmpdir:
-        dest = pathlib.Path(tmpdir) / "sidecar.json"
-        try:
-            download(url, dest)
-            sidecar = json.loads(dest.read_text())
-        except FetchError as exc:
-            warn(f"{url}: cannot download sidecar ({exc})")
-            return {}
-        except (ValueError, OSError) as exc:
-            warn(f"{url}: cannot read sidecar ({exc})")
-            return {}
-    if not isinstance(sidecar, dict):
-        warn(f"{url}: cannot parse sidecar (not a JSON object)")
-        return {}
-    return sidecar
-
-
-def cid_from_sidecar(lgx_url: str, sha256: str, sidecar: dict) -> str:
-    """The sidecar's CID, or "" unless its sha256 matches the package."""
-    cid = sidecar.get("cid")
-    if not isinstance(cid, str) or not cid.strip():
-        return ""
-    if sidecar.get("sha256") != sha256:
-        warn(f"{lgx_url}: sidecar sha256 does not match the package, dropping its CID")
-        return ""
-    return cid.strip()
 
 
 def version_entry_from_lgx(
@@ -672,12 +649,7 @@ def fetch_entry(
     `version_entry_from_lgx` stays one code path regardless of where
     the bytes came from."""
     lgx_path, released_at = resolve_lgx(url, local_path, fetch_mode, workdir)
-    name, entry = version_entry_from_lgx(url, lgx_path, released_at, icons_dir, icons_rel)
-
-    if fetch_mode != "none":
-        cid = cid_from_sidecar(url, entry["sha256"], fetch_sidecar(url))
-        entry["urls"] = [f"logos:{cid}", url] if cid else [url]
-    return name, entry
+    return version_entry_from_lgx(url, lgx_path, released_at, icons_dir, icons_rel)
 
 
 # ── index mutation helpers ───────────────────────────────────────────────
@@ -835,7 +807,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     icons_dir = resolve_icons_dir(args)
     with tempfile.TemporaryDirectory(prefix="logos-index-") as tmpdir:
         workdir = pathlib.Path(tmpdir)
-        for url, local_path in pairs:
+        for url, local_path, urls in pairs:
             try:
                 name, entry = fetch_entry(url, local_path, args.fetch, workdir,
                                           icons_dir, args.icons_dir)
@@ -843,6 +815,9 @@ def cmd_build(args: argparse.Namespace) -> int:
                 # Single-package failure aborts the build (locked
                 # policy: a bad input is not silently dropped).
                 die(str(exc))
+
+            entry["urls"] = urls
+
             merge_version(index, name, entry)
 
     sort_versions(index)
@@ -864,7 +839,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     # positional URLs first (URL-only, no pair), then any --from-file
     # entries (which may be paired). Then --with-local CLI overrides
     # apply on top (updating known URLs or appending new ones).
-    pairs: list[tuple[str, str | None]] = [(u, None) for u in (args.url or [])]
+    pairs: list[tuple[str, str | None, list[str]]] = [(u, None, [u]) for u in (args.url or [])]
     if args.from_file:
         pairs.extend(read_url_pairs(pathlib.Path(args.from_file)))
     pairs = merge_cli_pairs(pairs, args.with_local)
@@ -876,13 +851,16 @@ def cmd_add(args: argparse.Namespace) -> int:
     icons_dir = resolve_icons_dir(args)
     with tempfile.TemporaryDirectory(prefix="logos-index-") as tmpdir:
         workdir = pathlib.Path(tmpdir)
-        for url, local_path in pairs:
+        for url, local_path, urls in pairs:
             try:
                 name, entry = fetch_entry(url, local_path, args.fetch, workdir,
                                           icons_dir, args.icons_dir)
             except FetchError as exc:
                 # Same single-package-aborts policy as `build`.
                 die(str(exc))
+
+            entry["urls"] = urls
+
             if merge_version(index, name, entry):
                 added += 1
 
@@ -1180,13 +1158,6 @@ def _validate_entry_against_file(
             f"{pkg_name} v{idx_manifest.get('version', '?')}: size mismatch "
             f"({entry['size']} vs {observed.get('size')})"
         )
-
-    if "urls" in entry and "urls" in observed \
-            and set(entry["urls"]) != set(observed["urls"]):
-        issues.append(
-            f"{pkg_name} v{idx_manifest.get('version', '?')}: urls mismatch "
-            f"({entry['urls']} vs {observed['urls']})"
-        )
     return issues
 
 
@@ -1408,11 +1379,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
         # index get a soft warning at the end (stale path the user
         # supplied, or a typo) but don't fail the run — we still want
         # the cross-check to cover the rest of the index.
-        pair_pairs: list[tuple[str, str | None]] = []
+        pair_pairs: list[tuple[str, str | None, list[str]]] = []
         if args.pairs_file:
             pair_pairs.extend(read_url_pairs(pathlib.Path(args.pairs_file)))
         pair_pairs = merge_cli_pairs(pair_pairs, args.with_local)
-        pair_lookup: dict[str, str | None] = {url: path for url, path in pair_pairs}
+        pair_lookup: dict[str, str | None] = {url: path for url, path, _ in pair_pairs}
         index_urls: set[str] = set()
 
         info("light pass complete; running --full cross-check against URLs…")
@@ -1482,8 +1453,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pb = sub.add_parser("build", help="full rebuild from a URL-list file")
     pb.add_argument("urls_file",
-                    help="text file with one entry per line: either `<url>` "
-                         "or `<url> <local-path>` (whitespace-separated). "
+                    help="text file with one entry per line: "
+                         "`[logos:<cid>] <url> [<local-path>]` "
+                         "(whitespace-separated). "
                          "Blank lines + `#` comments ignored.")
     pb.add_argument("--icons-dir", default="icons",
                     help="directory (relative to the index) for icon sidecars; "
@@ -1513,8 +1485,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help=".lgx URL(s) — positional (URL-only; for pairs, use "
                          "--from-file or --with-local)")
     pa.add_argument("--from-file", default=None,
-                    help="read additional URLs from this file (lines may be "
-                         "`<url>` or `<url> <local-path>`)")
+                    help="read additional URLs from this file (lines are "
+                         "`[logos:<cid>] <url> [<local-path>]`)")
     _add_pair_flags(pa)
     pa.set_defaults(func=cmd_add)
 

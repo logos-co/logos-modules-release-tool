@@ -12,11 +12,11 @@ pass, which would defeat the point.
     nix build github:logos-co/logos-package#lgx   # then put ./result/bin on PATH
 """
 
-import json
+import pathlib
 import shutil
 import subprocess
+import tempfile
 import unittest
-from unittest import mock
 
 import index
 
@@ -195,56 +195,40 @@ class TestValidateWithoutLgx(unittest.TestCase):
 LGX_URL = ("https://github.com/logos-co/logos-modules-release/releases/"
            "download/demo_module-v1.0.0/demo_module-1.0.0.lgx")
 
-class TestSidecar(unittest.TestCase):
-    """Test the sidecar is fetched and the CID can be retrieved."""
-
-    def test_reads_the_cid_from_the_sidecar(self):
-        # Provide a sidecar with a CID
-        def fake_download(url, dest):
-            dest.write_text(json.dumps({"sha256": "abc", "cid": "zDvZRw"}))
-
-        with mock.patch.object(index, "download", fake_download):
-            self.assertEqual(index.fetch_sidecar(LGX_URL).get("cid", ""), "zDvZRw")
-
-    def test_no_cid_when_absent_from_sidecar(self):
-        def fake_download(url, dest):
-            dest.write_text(json.dumps({"sha256": "abc"}))
-
-        with mock.patch.object(index, "download", fake_download):
-            self.assertEqual(index.fetch_sidecar(LGX_URL).get("cid", ""), "")
-
-    def test_no_cid_when_the_sidecar_download_fails(self):
-        def fake_download(url, dest):
-            raise index.FetchError(f"download failed for {url}: HTTP 404 Not Found")
-
-        with mock.patch.object(index, "download", fake_download):
-            self.assertEqual(index.fetch_sidecar(LGX_URL).get("cid", ""), "")
-
-    def test_no_cid_when_the_sidecar_is_not_json(self):
-        def fake_download(url, dest):
-            dest.write_text("<html>404</html>")
-
-        with mock.patch.object(index, "download", fake_download):
-            self.assertEqual(index.fetch_sidecar(LGX_URL).get("cid", ""), "")
+CID_URL = "logos:zDvZRw"
 
 
-class TestCidFromSidecar(unittest.TestCase):
+def read_line(line: str) -> list:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = pathlib.Path(tmpdir) / "urls.txt"
+        path.write_text(line + "\n")
+        return index.read_url_pairs(path)
 
-    def test_keeps_the_cid_when_sha256_matches(self):
-        sidecar = {"sha256": "abc", "cid": "zDvZRw"}
-        self.assertEqual(index.cid_from_sidecar(LGX_URL, "abc", sidecar), "zDvZRw")
 
-    def test_drops_the_cid_when_sha256_differs(self):
-        sidecar = {"sha256": "other", "cid": "zDvZRw"}
-        self.assertEqual(index.cid_from_sidecar(LGX_URL, "abc", sidecar), "")
+class TestReadUrlPairs(unittest.TestCase):
 
-    def test_drops_the_cid_when_sha256_is_absent(self):
-        sidecar = {"cid": "zDvZRw"}
-        self.assertEqual(index.cid_from_sidecar(LGX_URL, "abc", sidecar), "")
+    def test_a_single_url_is_its_only_source(self):
+        self.assertEqual(read_line(LGX_URL), [(LGX_URL, None, [LGX_URL])])
 
-    def test_drops_a_cid_that_is_not_a_string(self):
-        sidecar = {"sha256": "abc", "cid": None}
-        self.assertEqual(index.cid_from_sidecar(LGX_URL, "abc", sidecar), "")
+    def test_a_leading_cid_is_a_source_beside_the_url(self):
+        self.assertEqual(read_line(f"{CID_URL} {LGX_URL}"),
+                         [(LGX_URL, None, [CID_URL, LGX_URL])])
+
+    def test_a_local_path_can_follow_a_cid_and_url(self):
+        self.assertEqual(read_line(f"{CID_URL} {LGX_URL} ./dist/demo.lgx"),
+                         [(LGX_URL, "./dist/demo.lgx", [CID_URL, LGX_URL])])
+
+    def test_a_local_path_keeps_its_spaces(self):
+        self.assertEqual(read_line(f"{LGX_URL} ./my dist/demo.lgx"),
+                         [(LGX_URL, "./my dist/demo.lgx", [LGX_URL])])
+
+    def test_a_line_with_no_downloadable_url_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            read_line(CID_URL)
+
+    def test_a_logos_prefix_with_no_cid_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            read_line(f"logos: {LGX_URL}")
 
 
 if __name__ == "__main__":

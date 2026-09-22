@@ -103,8 +103,7 @@ dropped automatically (clients never need to see empty entries).
 
 `validate --full` enforces the same index↔file bindings the client
 (`verifyDownloadAgainstIndex` in `package_downloader_lib.cpp`) enforces at
-install time — `rootHash`, manifest fields, signer DID, `sha256`, `size`,
-plus `urls`.
+install time — `rootHash`, manifest fields, signer DID, `sha256`, `size`.
 Both modes report **every** problem found in a single run and exit
 non-zero on any.
 
@@ -147,7 +146,13 @@ https://example.com/foo-v1.0.0.lgx
 # … or a URL followed by a local path (any whitespace works).
 https://example.com/bar-v1.0.0.lgx   /home/me/uploads/bar.lgx
 https://example.com/baz-v1.0.0.lgx	./dist/baz.lgx
+
+# … and either form can start with a Logos Storage CID.
+logos:zDvZRwzm3g3mPcYu1NmDKV5jCccw4FZ83XKyu85AjSCg7gH7zQdL   https://example.com/qux-v1.0.0.lgx
 ```
+
+The `logos:` source and the URL both go into the entry's `urls`. The package
+is downloaded from the URL.
 
 Inline trailing `# ...` comments are stripped too.
 
@@ -160,10 +165,6 @@ Apply to `build`, `add`, and `validate --full`:
 | `missing` *(default)* | Use the paired local file if one was supplied; otherwise download. |
 | `all` | Always download. Local paths are noted but ignored. |
 | `none` | Never download. Every URL must have a local pairing or it's an error. |
-
-Except with `none`, each entry gets a `urls` list. It holds a `logos:<cid>`
-source when the `sidecar.json` next to the `.lgx` has a `cid` and a `sha256`
-equal to the package's. The sidecar is downloaded even when the `.lgx` is local.
 
 ## Catalog format
 
