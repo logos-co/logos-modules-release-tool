@@ -111,7 +111,6 @@ through it.
   "description": "The modules maintained by the Logos core team.",
   "homepage": "https://github.com/logos-co/logos-modules-v2",
   "indexUrl": "https://github.com/logos-co/logos-modules-v2/releases/download/index/index.json",
-  "network": "logos.test",
   "trustedSigners": [
     {
       "did": "did:jwk:eyJjcnYiOiJFZDI1NTE5Iiwia3R5IjoiT0tQIiwieCI6Ii4uLiJ9",
@@ -130,7 +129,6 @@ through it.
 | `indexUrl` | string | **yes** | Absolute URL of this catalog's `index.json`. The client fetches it verbatim — point it at wherever you publish the index. |
 | `description` | string | no | One-line human description. Defaults to empty. |
 | `homepage` | string | no | Informational URL (project page, docs). Defaults to empty. |
-| `network` | string | no | Logos Storage network. The catalog publishes its packages to this network. Defaults to empty. |
 | `trustedSigners` | array | no | Signer identities this catalog vouches for. See §2.3. Defaults to empty. |
 | `includesUrl` | string | no | Absolute URL of the **includes document**, listing the other catalogs this one draws packages from. See §11. Absent means it draws from none. |
 | `schemaVersion` | number | no* | Format version. See §2.4. |
@@ -191,7 +189,7 @@ package in the catalog and every published version of each.
           "publisherRef": "wallet_module-v1.0.0",
           "url": "https://github.com/logos-co/logos-modules-v2/releases/download/wallet_module-v1.0.0/wallet_module-1.0.0.lgx",
           "urls": [
-            "logos:zDvZRwzm3g3mPcYu1NmDKV5jCccw4FZ83XKyu85AjSCg7gH7zQdL",
+            "logos:logos.test:zDvZRwzm3g3mPcYu1NmDKV5jCccw4FZ83XKyu85AjSCg7gH7zQdL",
             "https://github.com/logos-co/logos-modules-v2/releases/download/wallet_module-v1.0.0/wallet_module-1.0.0.lgx"
           ],
           "size": 17083080,
@@ -291,7 +289,7 @@ or does not contain any `https://` scheme.
 
 | Scheme | Meaning |
 |---|---|
-| `logos:<cid>` | Logos Storage content identifier. Fetched through a storage node, which must run on the network the repository declares (§2.2). The CID is derived from the content, so the same artifact has the same CID on every network. |
+| `logos:<network>:<cid>` | Logos Storage content identifier on a network, e.g. `logos:logos.test:<cid>`. Fetched through a storage node running on that network. The CID is derived from the content, so the same artifact has the same CID on every network: one source is listed per network. |
 | `https://…` | A plain HTTPS mirror, equivalent to `url`. |
 
 Every source must serve the same content.
@@ -716,7 +714,6 @@ shallower before deeper.
 ```
 name*          displayName*          indexUrl*           ← required
 description    homepage              trustedSigners[]    ← optional
-network
 includesUrl                                              ← optional, §11
 schemaVersion (advisory, =1)
 trustedSigners[] = { did*, name? }

@@ -35,7 +35,7 @@
 # catalog some of its packages. This is where it gets caught.
 #
 # Input file format (urls-file / --from-file / --pairs-file): one entry
-# per line, `[logos:<cid>] <url> [<local-path>]` (whitespace-separated).
+# per line, `[logos:<network>:<cid> ...] <url> [<local-path>]` (whitespace-separated).
 # Blank lines and `#` comments are ignored.
 #
 # Fetch modes (build / add / validate --full):
@@ -255,12 +255,12 @@ def resolve_repo_name(cli_name: str | None) -> str:
 # ── URL list parsing ─────────────────────────────────────────────────────
 
 def read_url_pairs(path: pathlib.Path) -> list[tuple[str, str | None, list[str]]]:
-    """One entry per line: `[logos:<cid>] <url> [<local-path>]`.
+    """One entry per line: `[logos:<network>:<cid> ...] <url> [<local-path>]`.
     Blank lines and `#` comments are ignored; an inline ` #...` trailing
     comment is stripped too — common shell-style file convention.
 
     Returns a list of (url, local_path, urls) tuples in file order, with
-    `urls` holding the `logos:` source (if any) then `url`, and
+    `urls` holding the `logos:` sources (if any) then `url`, and
     `local_path = None` for URL-only lines. Backwards-compatible with
     the historical `<url> [<local-path>]` files."""
     pairs: list[tuple[str, str | None, list[str]]] = []
@@ -276,16 +276,17 @@ def read_url_pairs(path: pathlib.Path) -> list[tuple[str, str | None, list[str]]
         if not line or line.startswith("#"):
             continue
 
-        cid_url = None
-        if line.startswith("logos:"):
+        storage_urls = []
+        while line.startswith("logos:"):
             toks = line.split(None, 1)
+            network, _, cid = toks[0][len("logos:"):].partition(":")
 
-            if toks[0] == "logos:":
-                die(f"{path}: no CID after logos:")
+            if not network or not cid:
+                die(f"{path}: {toks[0]} is not logos:<network>:<cid>")
             if len(toks) < 2:
                 die(f"{path}: no downloadable URL after {toks[0]}")
 
-            cid_url = toks[0]
+            storage_urls.append(toks[0])
             line = toks[1]
         # `.split(None, 1)` splits on the first run of whitespace,
         # keeping any further whitespace inside the path token intact
@@ -293,7 +294,7 @@ def read_url_pairs(path: pathlib.Path) -> list[tuple[str, str | None, list[str]]
         toks = line.split(None, 1)
         url = toks[0]
         local_path = toks[1].strip() if len(toks) > 1 else None
-        urls = [cid_url, url] if cid_url else [url]
+        urls = storage_urls + [url]
         pairs.append((url, local_path, urls))
     return pairs
 
@@ -1454,7 +1455,7 @@ def build_parser() -> argparse.ArgumentParser:
     pb = sub.add_parser("build", help="full rebuild from a URL-list file")
     pb.add_argument("urls_file",
                     help="text file with one entry per line: "
-                         "`[logos:<cid>] <url> [<local-path>]` "
+                         "`[logos:<network>:<cid> ...] <url> [<local-path>]` "
                          "(whitespace-separated). "
                          "Blank lines + `#` comments ignored.")
     pb.add_argument("--icons-dir", default="icons",
@@ -1486,7 +1487,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "--from-file or --with-local)")
     pa.add_argument("--from-file", default=None,
                     help="read additional URLs from this file (lines are "
-                         "`[logos:<cid>] <url> [<local-path>]`)")
+                         "`[logos:<network>:<cid> ...] <url> [<local-path>]`)")
     _add_pair_flags(pa)
     pa.set_defaults(func=cmd_add)
 

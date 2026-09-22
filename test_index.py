@@ -195,7 +195,8 @@ class TestValidateWithoutLgx(unittest.TestCase):
 LGX_URL = ("https://github.com/logos-co/logos-modules-release/releases/"
            "download/demo_module-v1.0.0/demo_module-1.0.0.lgx")
 
-CID_URL = "logos:zDvZRw"
+CID_URL = "logos:logos.test:zDvZRw"
+DEV_CID_URL = "logos:logos.dev:zDvZRw"
 
 
 def read_line(line: str) -> list:
@@ -214,6 +215,10 @@ class TestReadUrlPairs(unittest.TestCase):
         self.assertEqual(read_line(f"{CID_URL} {LGX_URL}"),
                          [(LGX_URL, None, [CID_URL, LGX_URL])])
 
+    def test_a_cid_on_each_network_is_a_source(self):
+        self.assertEqual(read_line(f"{CID_URL} {DEV_CID_URL} {LGX_URL}"),
+                         [(LGX_URL, None, [CID_URL, DEV_CID_URL, LGX_URL])])
+
     def test_a_local_path_can_follow_a_cid_and_url(self):
         self.assertEqual(read_line(f"{CID_URL} {LGX_URL} ./dist/demo.lgx"),
                          [(LGX_URL, "./dist/demo.lgx", [CID_URL, LGX_URL])])
@@ -229,6 +234,14 @@ class TestReadUrlPairs(unittest.TestCase):
     def test_a_logos_prefix_with_no_cid_is_rejected(self):
         with self.assertRaises(SystemExit):
             read_line(f"logos: {LGX_URL}")
+
+    def test_a_cid_with_no_network_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            read_line(f"logos:zDvZRw {LGX_URL}")
+
+    def test_a_network_with_no_cid_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            read_line(f"logos:logos.test: {LGX_URL}")
 
 
 if __name__ == "__main__":
