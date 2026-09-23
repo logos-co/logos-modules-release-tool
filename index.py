@@ -10,7 +10,7 @@
 # the package-manager UI) consume the output unchanged.
 #
 # Per-version entry format mirrors build_index.py:
-#   { releasedAt, publisherRef, url, size, sha256, rootHash,
+#   { releasedAt, publisherRef, url, urls?, size, sha256, rootHash,
 #     manifest, signature? }
 #
 # Usage:
@@ -35,7 +35,7 @@
 # catalog some of its packages. This is where it gets caught.
 #
 # Input file format (urls-file / --from-file / --pairs-file): one entry
-# per line, either `<url>` or `<url> <local-path>` (whitespace-separated).
+# per line, `[logos:<network>:<cid> ...] <url> [<local-path>]` (whitespace-separated).
 # Blank lines and `#` comments are ignored.
 #
 # Fetch modes (build / add / validate --full):
@@ -254,15 +254,16 @@ def resolve_repo_name(cli_name: str | None) -> str:
 
 # ── URL list parsing ─────────────────────────────────────────────────────
 
-def read_url_pairs(path: pathlib.Path) -> list[tuple[str, str | None]]:
-    """One entry per line, either `<url>` or `<url> <local-path>`.
+def read_url_pairs(path: pathlib.Path) -> list[tuple[str, str | None, list[str]]]:
+    """One entry per line: `[logos:<network>:<cid> ...] <url> [<local-path>]`.
     Blank lines and `#` comments are ignored; an inline ` #...` trailing
     comment is stripped too — common shell-style file convention.
 
-    Returns a list of (url, local_path) tuples in file order, with
+    Returns a list of (url, local_path, urls) tuples in file order, with
+    `urls` holding the `logos:` sources (if any) then `url`, and
     `local_path = None` for URL-only lines. Backwards-compatible with
-    the historical single-URL-per-line files."""
-    pairs: list[tuple[str, str | None]] = []
+    the historical `<url> [<local-path>]` files."""
+    pairs: list[tuple[str, str | None, list[str]]] = []
     for raw in path.read_text(encoding="utf-8").splitlines():
         # Strip an inline comment if present, but only when preceded by
         # whitespace — URLs never contain `#` followed by whitespace and
@@ -274,20 +275,34 @@ def read_url_pairs(path: pathlib.Path) -> list[tuple[str, str | None]]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+
+        storage_urls = []
+        while line.startswith("logos:"):
+            toks = line.split(None, 1)
+            network, _, cid = toks[0][len("logos:"):].partition(":")
+
+            if not network or not cid:
+                die(f"{path}: {toks[0]} is not logos:<network>:<cid>")
+            if len(toks) < 2:
+                die(f"{path}: no downloadable URL after {toks[0]}")
+
+            storage_urls.append(toks[0])
+            line = toks[1]
         # `.split(None, 1)` splits on the first run of whitespace,
         # keeping any further whitespace inside the path token intact
         # (rare, but URLs and paths are user-supplied so don't lose it).
         toks = line.split(None, 1)
         url = toks[0]
         local_path = toks[1].strip() if len(toks) > 1 else None
-        pairs.append((url, local_path))
+        urls = storage_urls + [url]
+        pairs.append((url, local_path, urls))
     return pairs
 
 
 def merge_cli_pairs(
-    file_pairs: list[tuple[str, str | None]],
+    file_pairs: list[tuple[str, str | None, list[str]]],
     cli_with_local: list[list[str]] | None,
-) -> list[tuple[str, str | None]]:
+) -> list[tuple[str, str | None, list[str]]]:
     """Apply `--with-local URL PATH` overrides to a list of file pairs,
     preserving file order. A CLI pair whose URL is already present
     UPDATES the entry's local path; a CLI pair with a new URL is
@@ -298,13 +313,13 @@ def merge_cli_pairs(
         return list(file_pairs)
     cli_map = {url: path for url, path in cli_with_local}
     seen: set[str] = set()
-    out: list[tuple[str, str | None]] = []
-    for url, p in file_pairs:
-        out.append((url, cli_map.get(url, p)))
+    out: list[tuple[str, str | None, list[str]]] = []
+    for url, p, urls in file_pairs:
+        out.append((url, cli_map.get(url, p), urls))
         seen.add(url)
     for url, p in cli_with_local:
         if url not in seen:
-            out.append((url, p))
+            out.append((url, p, [url]))
             seen.add(url)
     return out
 
@@ -793,7 +808,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     icons_dir = resolve_icons_dir(args)
     with tempfile.TemporaryDirectory(prefix="logos-index-") as tmpdir:
         workdir = pathlib.Path(tmpdir)
-        for url, local_path in pairs:
+        for url, local_path, urls in pairs:
             try:
                 name, entry = fetch_entry(url, local_path, args.fetch, workdir,
                                           icons_dir, args.icons_dir)
@@ -801,6 +816,9 @@ def cmd_build(args: argparse.Namespace) -> int:
                 # Single-package failure aborts the build (locked
                 # policy: a bad input is not silently dropped).
                 die(str(exc))
+
+            entry["urls"] = urls
+
             merge_version(index, name, entry)
 
     sort_versions(index)
@@ -822,7 +840,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     # positional URLs first (URL-only, no pair), then any --from-file
     # entries (which may be paired). Then --with-local CLI overrides
     # apply on top (updating known URLs or appending new ones).
-    pairs: list[tuple[str, str | None]] = [(u, None) for u in (args.url or [])]
+    pairs: list[tuple[str, str | None, list[str]]] = [(u, None, [u]) for u in (args.url or [])]
     if args.from_file:
         pairs.extend(read_url_pairs(pathlib.Path(args.from_file)))
     pairs = merge_cli_pairs(pairs, args.with_local)
@@ -834,13 +852,16 @@ def cmd_add(args: argparse.Namespace) -> int:
     icons_dir = resolve_icons_dir(args)
     with tempfile.TemporaryDirectory(prefix="logos-index-") as tmpdir:
         workdir = pathlib.Path(tmpdir)
-        for url, local_path in pairs:
+        for url, local_path, urls in pairs:
             try:
                 name, entry = fetch_entry(url, local_path, args.fetch, workdir,
                                           icons_dir, args.icons_dir)
             except FetchError as exc:
                 # Same single-package-aborts policy as `build`.
                 die(str(exc))
+
+            entry["urls"] = urls
+
             if merge_version(index, name, entry):
                 added += 1
 
@@ -1359,11 +1380,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
         # index get a soft warning at the end (stale path the user
         # supplied, or a typo) but don't fail the run — we still want
         # the cross-check to cover the rest of the index.
-        pair_pairs: list[tuple[str, str | None]] = []
+        pair_pairs: list[tuple[str, str | None, list[str]]] = []
         if args.pairs_file:
             pair_pairs.extend(read_url_pairs(pathlib.Path(args.pairs_file)))
         pair_pairs = merge_cli_pairs(pair_pairs, args.with_local)
-        pair_lookup: dict[str, str | None] = {url: path for url, path in pair_pairs}
+        pair_lookup: dict[str, str | None] = {url: path for url, path, _ in pair_pairs}
         index_urls: set[str] = set()
 
         info("light pass complete; running --full cross-check against URLs…")
@@ -1433,8 +1454,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pb = sub.add_parser("build", help="full rebuild from a URL-list file")
     pb.add_argument("urls_file",
-                    help="text file with one entry per line: either `<url>` "
-                         "or `<url> <local-path>` (whitespace-separated). "
+                    help="text file with one entry per line: "
+                         "`[logos:<network>:<cid> ...] <url> [<local-path>]` "
+                         "(whitespace-separated). "
                          "Blank lines + `#` comments ignored.")
     pb.add_argument("--icons-dir", default="icons",
                     help="directory (relative to the index) for icon sidecars; "
@@ -1464,8 +1486,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help=".lgx URL(s) — positional (URL-only; for pairs, use "
                          "--from-file or --with-local)")
     pa.add_argument("--from-file", default=None,
-                    help="read additional URLs from this file (lines may be "
-                         "`<url>` or `<url> <local-path>`)")
+                    help="read additional URLs from this file (lines are "
+                         "`[logos:<network>:<cid> ...] <url> [<local-path>]`)")
     _add_pair_flags(pa)
     pa.set_defaults(func=cmd_add)
 

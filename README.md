@@ -146,7 +146,13 @@ https://example.com/foo-v1.0.0.lgx
 # … or a URL followed by a local path (any whitespace works).
 https://example.com/bar-v1.0.0.lgx   /home/me/uploads/bar.lgx
 https://example.com/baz-v1.0.0.lgx	./dist/baz.lgx
+
+# … and either form can start with a Logos Storage CID, one per network.
+logos:logos.test:zDvZRwzm3g3mPcYu1NmDKV5jCccw4FZ83XKyu85AjSCg7gH7zQdL   https://example.com/qux-v1.0.0.lgx
 ```
+
+The `logos:` sources and the URL all go into the entry's `urls`. The package
+is downloaded from the URL.
 
 Inline trailing `# ...` comments are stripped too.
 
