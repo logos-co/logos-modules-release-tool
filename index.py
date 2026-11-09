@@ -14,7 +14,7 @@
 #     manifest, signature? }
 #
 # Usage:
-#   ./index.py build    <urls-file>         [-o index.json] [--name NAME]
+#   ./index.py build    <urls-file>         [-o index.json] [--name NAME] [--allow-empty]
 #                                           [--with-local URL PATH ...] [--fetch {missing,all,none}]
 #   ./index.py add      <index.json> [<url>...] [--from-file FILE]
 #                                           [--with-local URL PATH ...] [--fetch {missing,all,none}]
@@ -795,8 +795,9 @@ def cmd_build(args: argparse.Namespace) -> int:
     if not urls_file.exists():
         die(f"urls file not found: {urls_file}")
     pairs = merge_cli_pairs(read_url_pairs(urls_file), args.with_local)
-    if not pairs:
-        die(f"{urls_file}: no URLs found (blank lines and `#` comments are ignored)")
+    if not pairs and not args.allow_empty:
+        die(f"{urls_file}: no URLs found (blank lines and `#` comments are ignored; "
+            "pass --allow-empty for a catalog with nothing published yet)")
 
     index: dict = {
         "schemaVersion": SCHEMA_VERSION,
@@ -1470,6 +1471,10 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--name", default=None,
                     help="repositoryName for the header (default: read from "
                          "./logos-repo.json, fallback to 'unknown')")
+    pb.add_argument("--allow-empty", action="store_true",
+                    help="write an index with no packages when the URL list "
+                         "is empty, for a catalog with nothing published yet "
+                         "(default: an empty list is an error)")
     _add_pair_flags(pb)
     pb.set_defaults(func=cmd_build)
 

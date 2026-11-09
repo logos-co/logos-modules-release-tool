@@ -12,6 +12,9 @@ pass, which would defeat the point.
     nix build github:logos-co/logos-package#lgx   # then put ./result/bin on PATH
 """
 
+import contextlib
+import io
+import json
 import pathlib
 import shutil
 import subprocess
@@ -242,6 +245,35 @@ class TestReadUrlPairs(unittest.TestCase):
     def test_a_network_with_no_cid_is_rejected(self):
         with self.assertRaises(SystemExit):
             read_line(f"logos:logos.test: {LGX_URL}")
+
+
+def build_empty_list(*flags: str) -> dict | None:
+    """`index.py build` over a URL list with nothing in it, as a catalog with
+    nothing published yet produces. Returns the written index, or None when
+    none was written."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        urls = pathlib.Path(tmpdir) / "urls.txt"
+        urls.write_text("# nothing published yet\n")
+        out = pathlib.Path(tmpdir) / "index.json"
+        index.main(["build", str(urls), "-o", str(out), "--name", "demo", *flags])
+        return json.loads(out.read_text()) if out.exists() else None
+
+
+@requires_lgx
+class TestBuildEmptyCatalog(unittest.TestCase):
+    """catalog-format.md: `packages` may be empty for a catalog with nothing
+    published yet."""
+
+    def test_allow_empty_writes_a_catalog_with_no_packages(self):
+        written = build_empty_list("--allow-empty")
+        self.assertEqual(written["packages"], [])
+        self.assertEqual(written["repositoryName"], "demo")
+
+    def test_an_empty_list_is_still_an_error_without_the_flag(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            build_empty_list()
+        self.assertIn("no URLs found", stderr.getvalue())
 
 
 if __name__ == "__main__":

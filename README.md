@@ -40,7 +40,7 @@ reports them as unchecked rather than failing when it is not.
 ## Subcommands
 
 ```
-index.py build    <urls-file>         [-o index.json] [--name NAME]
+index.py build    <urls-file>         [-o index.json] [--name NAME] [--allow-empty]
                                       [--with-local URL PATH ...] [--fetch {missing,all,none}]
 index.py add      <index.json> [<url>...] [--from-file FILE]
                                       [--with-local URL PATH ...] [--fetch {missing,all,none}]
@@ -62,6 +62,10 @@ index.py validate-includes <includes.json>   [--self-url URL] [--index-url URL]
 
 `--name` falls back to the `name` field of `./logos-repo.json` if present,
 then to `"unknown"`.
+
+An empty URL list is an error, so a typo'd or truncated file can't publish an
+empty catalog. `--allow-empty` writes an index with `"packages": []` instead,
+for a catalog with nothing published yet.
 
 ### `add` — merge new versions into an existing index
 
